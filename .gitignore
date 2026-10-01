@@ -13,6 +13,10 @@ out/
 
 5g_simulation_dbg
 
+5g_simulation.exe
+
+5g_simulation_dbg.exe
+
 .metadata/
 
 *.log

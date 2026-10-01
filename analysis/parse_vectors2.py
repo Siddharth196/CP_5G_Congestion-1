@@ -406,7 +406,9 @@ def report(df):
               f"total {ho.sum()}   cells: "
               f"{sorted(int(c) for c in cells['serving_cell'].unique())}")
 
-    g = df["cell_granted_prbs"]
+    # one value per (cell, bin): UE rows repeat the cell total, which would
+    # weight busy cells by how many UEs they serve
+    g = df.drop_duplicates(["serving_cell", "bin"])["cell_granted_prbs"]
     if g.notna().any():
         mx = g.max()
         print(f"\ncell_granted_prbs max = {mx:,.1f}   (ceiling {PRB_CEILING:,})")
@@ -420,7 +422,7 @@ def report(df):
         else:
             print("  -> scale matches TRACTOR summed over UEs per bin.")
         util = g / PRB_CEILING
-        print(f"  utilisation p50 {util.quantile(.5):.3f}  "
+        print(f"  utilisation per cell-bin  p50 {util.quantile(.5):.3f}  "
               f"p95 {util.quantile(.95):.3f}  max {util.max():.3f}")
         if util.max() < 0.5:
             print("  WARNING: the cell never approaches saturation in this "

@@ -10,6 +10,8 @@ its output into the canonical schema shared with the TRACTOR dataset.
 | `demo.xml` | IPv4 address plan for the configurator |
 | `run` | Launcher that sets the NED path (fixes `Cannot resolve module type 'LteChannelControl'`) |
 | `analysis/parse_vectors2.py` | `.vec` export → canonical per-UE, 250 ms CSV |
+| `analysis/export_all.sh` | Runs the export + parser over every `.vec` in `results/` |
+| `analysis/congestion_stats.py` | Starvation / utilisation / onset summary per run (CHANGES.md §14) |
 | `CHANGES.md` | What was changed and why, with evidence, including first-run results |
 
 Requires OMNeT++ 6.4.0, INET 4.6.0 and Simu5G 1.4.3.
@@ -39,6 +41,13 @@ python analysis/parse_vectors2.py raw.csv sim_canon.csv --run UrbanCongestion-0
 
 Needs `pandas` and `numpy`. The parser prints a fill-rate report, handover
 counts and a PRB-utilisation check; read it before using the output.
+
+To convert every run in `results/` at once (output and reports go to
+`results/canonical/`):
+
+```bash
+sh analysis/export_all.sh
+```
 
 Things the output columns do **not** mean:
 

@@ -186,8 +186,7 @@ declarations only.
 # Stage 1b — corrections after the first real runs
 
 Checked against the Simu5G 1.4.3 / OMNeT++ 6.4.0 sources and confirmed by
-completed runs (`Tiny`, and 120 s / 50 UE runs of `UrbanCongestion` and
-`HeavyLoad`, seed 0). Several Stage 1 conclusions came from a run whose
+completed runs (`Tiny`, and seed 0 of all six 120 s scenarios). Several Stage 1 conclusions came from a run whose
 `app[0]` was an INET app, or from settings that silently matched nothing.
 
 ## 11. Stage 1 statements that were wrong
@@ -237,14 +236,35 @@ Served/offered per UE and bin, with offered DL known exactly from the CBR
 configuration; starved = below 0.415 (TRACTOR's mixture valley) with 2-bin
 hysteresis; onsets at a 1 s horizon. Seed 0, first second excluded.
 
-| Config | Cell DL util. p95 | DL starved | DL onsets @1 s | UL starved | Latency p50 / p95 |
-|---|---|---|---|---|---|
-| UrbanCongestion | 0.91 | 25.3 % | 1,490 | 0.1 % | 53 ms / 2.8 s |
-| HeavyLoad | 0.91 | 50.9 % | 3,010 | 0.1 % | 287 ms / 8.8 s |
+| Config | UEs | Cell DL util. p50 / p95 | CQI p5 / p50 | DL starved | DL onsets @1 s | UL starved | Handovers | Latency p50 / p95 |
+|---|---|---|---|---|---|---|---|---|
+| LightLoad | 20 | 0.00 / 0.03 | 10.5 / 14.0 | 1.0 % | 7 | 0.0 % | 35 | 5 ms / 11 ms |
+| UrbanCongestion | 50 | 0.25 / 0.91 | 4.1 / 12.0 | 25.3 % | 1,490 | 0.1 % | 57 | 53 ms / 2.8 s |
+| GradualCongestion | 50 | 0.24 / 0.91 | 4.0 / 12.1 | 25.0 % | 1,504 | 0.0 % | 53 | 54 ms / 2.6 s |
+| HighMobility | 50 | 0.27 / 0.91 | 4.0 / 11.5 | 26.0 % | 1,578 | 0.1 % | 127 | 52 ms / 2.4 s |
+| LowMobility | 50 | 0.32 / 0.90 | 2.0 / 11.0 | 25.8 % | 1,146 | 0.9 % | 59 | 40 ms / 3.9 s |
+| HeavyLoad | 50 | 0.29 / 0.91 | 4.0 / 11.8 | 50.9 % | 3,010 | 0.1 % | 44 | 287 ms / 8.8 s |
 
-Starvation is downlink-only and concentrated on the video UEs (0–19) served
-by the saturated macro cell. The uplink burst never starves anyone, so it is
-not a congestion source. `corr(latency, rlc_delay)` is still 1.0000.
+Findings:
+
+- Load now produces a clean gradient (1 % → 25 % → 51 % starved), the same
+  kind of response TRACTOR shows across its slicing-off load sweep.
+- Starvation is downlink-only and concentrated on the video UEs (0–19,
+  median served/offered ≈ 0.5, 0.1 in `HeavyLoad`) on the saturated macro
+  cell; web and IoT UEs are served in full.
+- The uplink burst is real but never starves anyone: during 50–65 s UEs 0–29
+  offer 0.90 Mbit/s each and are served 0.89, and uplink cell utilisation
+  rises from 0.10 to 0.78. `GradualCongestion` only reshapes that burst, so
+  it is indistinguishable from `UrbanCongestion`. Uplink congestion needs a
+  heavier burst (larger `messageLength` or shorter `sendInterval`).
+- `HighMobility` roughly doubles handovers (127 vs ~55), so it does what its
+  description says; the §9 conclusion came from the parser artifact above.
+- Served/offered is a direct per-UE analogue of granted/requested: the
+  server traffic is CBR, so offered DL is known exactly. This is a candidate
+  for the open label decision that needs neither a Simu5G patch nor the
+  cell-utilisation proxy. (PDCP counts IP packets: add 28 B of IP/UDP header
+  to each payload when computing offered.)
+- `corr(latency, rlc_delay)` is still 1.0000.
 
 ## 15. Windows notes
 
