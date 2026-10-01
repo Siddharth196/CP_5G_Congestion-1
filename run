@@ -27,6 +27,12 @@ for d in "$INET_ROOT/src" "$SIMU5G_ROOT/src"; do
     fi
 done
 
+# Windows (OMNeT++'s MSYS/MinGW shell) has no rpath, so the INET and Simu5G
+# DLLs must be on PATH. Linux finds them through the rpath set by the Makefile.
+case "$(uname -s)" in
+    MINGW*|MSYS*|CYGWIN*) PATH="$INET_ROOT/src:$SIMU5G_ROOT/src:$PATH" ;;
+esac
+
 if [ ! -x "$DIR/5g_simulation" ]; then
     echo "run: $DIR/5g_simulation not found or not executable -- run 'make' first" >&2
     exit 1

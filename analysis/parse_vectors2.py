@@ -44,6 +44,10 @@ Revised with the corrected omnetpp.ini
      to be fractions in a column named _pct.
  10. avgServedBlocksUl is emitted only when the UL scheduler runs, so a bin
      with no sample means 0 RBs, not missing data.
+ 11. servingCell is emitted every 100 ms, and 0 means "not attached" (e.g.
+     at t=0, before the first association). It is treated as missing and
+     forward-filled, never mapped to a cell. The idle LTE phy emits 0 for the
+     whole run, which is what item 6 removes.
 
 Usage
 -----
@@ -309,6 +313,8 @@ def join_cell_to_ue(df):
 
     if "serving_cell" in ue.columns:
         ue = ue.sort_values(["node", "bin"])
+        # MacNodeId 0 = not attached: carry the last real cell instead
+        ue["serving_cell"] = ue["serving_cell"].where(ue["serving_cell"] != 0)
         ue["serving_cell"] = ue.groupby("node")["serving_cell"].ffill()
         unknown = sorted({int(v) for v in ue["serving_cell"].dropna()}
                          - CELL_ID_TO_NAME.keys())
@@ -380,16 +386,25 @@ def report(df):
           f"{int(df['n_ue_active'].max()) if df['n_ue_active'].notna().any() else 0}")
 
     print("\nfill rate per column (%):")
-    for c in ["cell_granted_prbs", "cell_granted_prbs_ul", "dl_cqi",
-              "ul_sinr", "dl_mbps", "ul_mbps", "ul_offered_mbps_simonly",
-              "dl_error_pct", "ul_error_pct", "latency_simonly",
-              "mac_delay_simonly"]:
+    for c in ["serving_cell", "cell_granted_prbs", "cell_granted_prbs_ul",
+              "dl_cqi", "ul_sinr", "dl_mbps", "ul_mbps",
+              "ul_offered_mbps_simonly", "dl_error_pct", "ul_error_pct",
+              "latency_simonly"]:
         pct = 100 * df[c].notna().mean()
         flag = "   <-- EMPTY" if pct < 1 else ""
         print(f"  {c:<24} {pct:6.2f}{flag}")
     print("  granted_prbs             expected empty (no per-UE grant in Simu5G)")
     print("  dl_buffer_bytes          expected empty (no statistic in Simu5G)")
     print("  requested_prbs           expected empty (no statistic in Simu5G)")
+    print("  mac_delay_simonly        expected empty (macDelayDl never emitted)")
+
+    cells = df.dropna(subset=["serving_cell"]).sort_values(["ue", "bin"])
+    if not cells.empty:
+        ho = cells.groupby("ue")["serving_cell"].apply(
+            lambda s: int((s.diff().fillna(0) != 0).sum()))
+        print(f"\nhandovers per UE: median {ho.median():.0f}  max {ho.max()}  "
+              f"total {ho.sum()}   cells: "
+              f"{sorted(int(c) for c in cells['serving_cell'].unique())}")
 
     g = df["cell_granted_prbs"]
     if g.notna().any():
