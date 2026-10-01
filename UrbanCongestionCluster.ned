@@ -15,6 +15,7 @@ network UrbanCongestionCluster
 {
     parameters:
         int numUEs = default(50);
+        int numBgCells = default(4);   // interference-only cells, see omnetpp.ini
         @display("bgb=1000,1000;bgg=100,1,grey95");
 
     submodules:
@@ -61,7 +62,7 @@ network UrbanCongestionCluster
         microGnb3: gNodeB {
             @display("p=500,700;is=s");
         }
-        bgCell[4]: BackgroundCell {
+        bgCell[numBgCells]: BackgroundCell {
             @display("p=466,139;is=l");
         }
 

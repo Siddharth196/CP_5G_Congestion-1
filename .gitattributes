@@ -1,0 +1,5 @@
+# Files executed or parsed on Linux/WSL must keep LF endings even when the
+# repository is checked out on Windows (CRLF breaks `#!/bin/sh` scripts).
+run         text eol=lf
+*.sh        text eol=lf
+Makefile    text eol=lf

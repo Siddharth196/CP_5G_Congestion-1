@@ -19,3 +19,9 @@ out/
 
 results/
 
+# OMNeT++ result files and indexes written outside results/
+*.vec
+*.vci
+*.sca
+*.elog
+

@@ -1,0 +1,45 @@
+#!/bin/sh
+# Launch the simulation from a plain shell (outside the OMNeT++ IDE).
+#
+# The IDE builds the NED path from the project references in .project; a
+# shell does not, which is what produced
+#     Cannot resolve module type 'LteChannelControl'
+# (the type exists in Simu5G 1.4.3 as simu5g.world.radio.LteChannelControl).
+# This script passes the NED path explicitly, the same way Simu5G's own
+# bin/simu5g launcher does.
+#
+# INET_ROOT / SIMU5G_ROOT are set by `opp_env shell`; otherwise the sibling
+# layout assumed by the Makefile (../inet-4.6.0, ../simu5g-1.4.3) is used.
+#
+# Usage (from anywhere):
+#     sh run -c Tiny                  # Cmdenv, the default here
+#     sh run -c UrbanCongestion -r 0
+#     sh run -u Qtenv -c Tiny         # GUI
+
+DIR=$(cd "$(dirname "$0")" && pwd)
+INET_ROOT=${INET_ROOT:-$DIR/../inet-4.6.0}
+SIMU5G_ROOT=${SIMU5G_ROOT:-$DIR/../simu5g-1.4.3}
+
+for d in "$INET_ROOT/src" "$SIMU5G_ROOT/src"; do
+    if [ ! -d "$d" ]; then
+        echo "run: NED folder not found: $d (set INET_ROOT / SIMU5G_ROOT)" >&2
+        exit 1
+    fi
+done
+
+if [ ! -x "$DIR/5g_simulation" ]; then
+    echo "run: $DIR/5g_simulation not found or not executable -- run 'make' first" >&2
+    exit 1
+fi
+
+# Default to Cmdenv unless the caller picked a user interface.
+case " $* " in
+    *" -u "*) ;;
+    *) set -- -u Cmdenv "$@" ;;
+esac
+
+cd "$DIR" || exit 1
+exec ./5g_simulation \
+    -n ".:$SIMU5G_ROOT/src:$INET_ROOT/src" \
+    --image-path="$INET_ROOT/images:$SIMU5G_ROOT/images" \
+    "$@"
