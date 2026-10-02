@@ -232,9 +232,11 @@ line wins.
 
 ## 14. Does the scenario congest now?
 
-Served/offered per UE and bin, with offered DL known exactly from the CBR
-configuration; starved = below 0.415 (TRACTOR's mixture valley) with 2-bin
-hysteresis; onsets at a 1 s horizon. Seed 0, first second excluded.
+First analysis pass: served/offered per UE and bin, offered DL taken from the
+CBR configuration plus 28 B of IP/UDP header; starved = below 0.415 with
+2-bin hysteresis; onsets at a 1 s horizon. Seed 0, first second excluded.
+The final pipeline (§17–18) measures offered load from each run's own app
+parameters and uses threshold 0.5, so its numbers differ slightly.
 
 | Config | UEs | Cell DL util. p50 / p95 | CQI p5 / p50 | DL starved | DL onsets @1 s | UL starved | Handovers | Latency p50 / p95 |
 |---|---|---|---|---|---|---|---|---|
@@ -274,3 +276,123 @@ Findings:
   for each of the ~12,000 declared vectors, about 12 GB of committed memory per
   run. Linux overcommits; Windows fails the third parallel run with
   `std::bad_alloc`. With the option each run commits about 1 GB.
+
+---
+
+# Stage 2 — TRACTOR side, labels and experiment datasets
+
+Source: `logs/Multi-UE` of https://github.com/genesys-neu/TRACTOR (commit
+9509fbf), 189 `<IMSI>_metrics.csv` files in 33 conditions (Trial0: 12
+per-class conditions; Trials 1–3: `multi4`…`multi10`), one row per UE every
+250 ms. Code: `analysis/harmonise_tractor.py`, `labels.py`,
+`build_datasets.py`, checked by `tests.py`.
+
+## 16. What the real data does and does not support
+
+Reproduced exactly: 739,297 rows; 189 files in 33 conditions; one 19-column
+file (`Trial0/embb1/1010123456002`, no slicing columns) and 188 with 36
+columns; 250 ms reporting; slicing on = `slice_prb` 14 with median
+granted/requested 0.294, slicing off = median 1.010.
+
+**Not reproducible** from the public data under any definition tried
+(threshold 0.415 or 0.5, all rows or rows with demand, concurrency from
+`num_ues` or from UEs present):
+
+| Earlier figure | What the data gives |
+|---|---|
+| 114,057 starved records (15.4 %) | 77,813 (10.5 %) below 0.415; 81,028 below 0.5; 125,291 with any shortfall |
+| Starved, slicing off, by UEs: 1 → 0.006 %, 2 → 35.6 %, 3 → 44.7 %, 8 → 70.7 %, 9 → 82.0 % | Of rows with demand: 0 %, 0.1 %, 5 %, 48 %, 46 % |
+| P(starved in 1 s ∣ starved now) 0.86–0.97, base rate ≈ 0.25 | 0.72, base rate 0.02 (§17 label, all rows); 0.78 / 0.10 on rows with demand at 0.415 without hysteresis |
+| 8,670 onsets at 1 s | 3,606 (threshold 0.5) or 2,322 (0.415), slicing off |
+
+Do not cite the left-hand column.
+
+Further findings:
+
+- **The bimodality is a slicing artefact.** With slicing off,
+  granted/requested has one mode at 1.0 (58 % of demand rows in 0.9–1.5)
+  and a smooth left tail; no second mode near 0.29. With slicing on, 78 %
+  sit at 0.2–0.4 (the 14-PRB cap) and 22 % at 1.0. The fitted 0.415 valley
+  separated capped from uncapped users, not congested from uncongested.
+- **The mMTC "permanent cap" is also slicing.** Slicing off, mMTC UEs have
+  median ratio 1.29 and 1.3 % starved rows; eMBB 9.1 %, URLLC 11.8 %
+  (threshold 0.415). The reason for per-UE baseline thresholds disappears,
+  so labels use one absolute threshold.
+- **The PRB columns are downlink.** Rank correlations on rows with demand:
+  granted vs DL throughput 0.94 (UL 0.33); requested vs DL buffer 0.62
+  (UL buffer 0.11).
+- **The three trials are not repetitions.** Trial2 and Trial3 assign the
+  same trace to the same UE in only 2 of 49 cases; Trial1 has no trace list
+  (its UEs are `traffic_class = unknown`). They cannot serve as independent
+  seeds for confidence intervals.
+- **Real UEs are idle most of the time**: only 22 % of slicing-off rows have
+  any PRB demand, against 100 % in the simulator (constant-rate traffic).
+
+## 17. Labels
+
+`labels.py`, identical for both sources: ratio = supply ÷ demand per UE and
+bin; starved = ratio < **0.5** with **2-bin** hysteresis on entry and exit;
+onset = not starved now and starved **4 bins (1 s)** later. Bins without
+demand are not starved; a gap in a UE's bins resets the state.
+
+- TRACTOR (true label): `granted_prbs ÷ requested_prbs`.
+- Simulator: `dl_served_bytes ÷ dl_offered_bytes`. Simu5G emits no
+  requested-PRB statistic. Offered is the payload each server `CbrSender`
+  sends to the UE, computed from that app's parameters in the run's `.sca`;
+  served is the UE `CbrReceiver`'s `cbrReceivedBytes`. For one UE in one bin,
+  needed and granted PRBs are both bytes ÷ bits-per-PRB at the UE's MCS, so
+  the ratio equals granted ÷ requested up to MCS changes within the bin.
+
+TRACTOR with these settings: 2.2 % of rows starved (11.2 % of rows with
+demand), 3,606 onsets, episodes median 3 bins / p90 10 / max 725,
+P(still starved in 1 s) 0.72 vs base rate 0.02. Starved share of rows with
+demand by UEs present: 1 → 0, 2 → 0.1 %, 3 → 5.2 %, 4 → 22.6 %,
+8 → 48.3 %, 9 → 46.3 %, 10 → 21.0 %. Threshold sensitivity (state / onsets):
+0.3 → 1.2 % / 1,662; 0.415 → 1.7 % / 2,322; 0.5 → 2.2 % / 3,606;
+0.7 → 4.1 % / 6,107.
+
+Checking the simulator-side label on real data:
+
+| Candidate computable on both sides | vs true label on TRACTOR | vs served/offered in the simulator |
+|---|---|---|
+| served ÷ (served + DL buffer growth) | precision 0.95, recall 0.01, kappa 0.01 | (is the simulator label) |
+| cell_util ≥ 0.9 while the UE is active | precision 0.59, recall 0.65, kappa 0.61 | kappa −0.12 |
+
+- Buffer growth cannot stand in for offered load on real traffic: when a
+  TRACTOR UE is starved its DL buffer is already standing (median 10 kB vs
+  0) and arrivals adapt or are dropped, so served ≈ arrivals. The check
+  says nothing against the simulator label, whose offered load is exact.
+- The cell-saturation proxy works in TRACTOR's single cell but not in the
+  multi-cell simulator, where the macro cell is near-saturated much of the
+  time and who starves depends on each UE's channel. It is not used.
+- Remaining limitation: the two labels are measured differently (PRBs vs
+  bytes). Making them identical needs Simu5G patched to emit per-UE
+  requested PRBs.
+
+## 18. Experiment datasets
+
+`build_datasets.py`, seed 7. Shared TRACTOR test set: 30 % of each trial's
+conditions — `Trial0/mmtc3`, `Trial0/mmtc4`, `Trial0/urllc1`,
+`Trial0/urllc3`, `Trial1/multi10`, `Trial1/multi4`, `Trial2/multi4`,
+`Trial2/multi9`, `Trial3/multi10`, `Trial3/multi6` (242,347 rows; these
+conditions are larger than average, so 40 % of rows). E1 holds out the
+highest seed of every config with at least two seeds. Features are
+forward-filled within each UE series, then standardised with the train
+set's mean and std (`scaler.json`).
+
+Facts the modelling step must account for:
+
+- Label prevalence differs by an order of magnitude: simulator 35 % of rows
+  starved, TRACTOR 2.2 % (onsets 7 % vs 0.6 %). Use PR-AUC and calibrate.
+- E5's train side (4–6 UEs) has few onsets (≈ 240) against ≈ 1,350 in its
+  test side (9–10 UEs).
+- `n_ue_active` is 20 or 50 in the simulator but 1–10 in TRACTOR; it is
+  identity, not a feature.
+- Simulator seeds come from a queue that was still running when the
+  datasets were first built; re-run `export_all.sh` and `build_datasets.py`
+  after more seeds finish. Counts are in each `manifest.json`.
+
+## 19. Simulator seeds
+
+`UrbanCongestion` and `HeavyLoad` have seeds 0–4 queued, the other four
+scenarios seeds 0–2. Each 120 s run takes ~45 min on one core.

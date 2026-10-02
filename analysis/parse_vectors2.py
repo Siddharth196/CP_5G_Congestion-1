@@ -48,25 +48,29 @@ Revised with the corrected omnetpp.ini
      at t=0, before the first association). It is treated as missing and
      forward-filled, never mapped to a cell. The idle LTE phy emits 0 for the
      whole run, which is what item 6 removes.
+ 12. Output uses the canonical schema shared with harmonise_tractor.py
+     (canonical.py). For the label, dl_offered_bytes is the payload each
+     server CbrSender sends to the UE, computed from that app's own
+     parameters in the .sca (packetSize, samplingTime, startTime,
+     finishTime), and dl_served_bytes is the payload the UE's CbrReceiver
+     gets (cbrReceivedBytes). Export the .sca together with the .vec.
 
 Usage
 -----
-    opp_scavetool export results/UrbanCongestion-0.vec -o raw.csv -F CSV-R
-    python parse_vectors2.py raw.csv sim_canon.csv --run UrbanCongestion-0
+    opp_scavetool export -F CSV-R -o raw.csv results/UrbanCongestion-0.vec results/UrbanCongestion-0.sca
+    python parse_vectors2.py raw.csv sim_canon.csv
 """
 
 import argparse
+import os
 import re
 import sys
 
 import numpy as np
 import pandas as pd
 
-BIN_S = 0.25                          # matches TRACTOR's 250 ms reporting
-TTI_S = 0.001                         # numerology 0 -> 1 ms slots
-TTIS_PER_BIN = int(BIN_S / TTI_S)     # 250
-N_PRB = 50                            # **.numBands = 50
-PRB_CEILING = TTIS_PER_BIN * N_PRB    # 12500, the ceiling TRACTOR also shows
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from canonical import BIN_S, COLUMNS, PRB_CEILING, TTIS_PER_BIN, to_canonical  # noqa: E402
 
 # ---------------------------------------------------------------------------
 # Statistic base name -> canonical KPI.
@@ -90,6 +94,9 @@ SIGNALS = {
     "harqErrorRateDl":              "dl_error_pct",
     "harqErrorRateUl":              "ul_error_pct",
     "harqTxAttemptsDl":             "harq_attempts_simonly",
+
+    # --- DL payload delivered to the UE's CbrReceiver (label supply) ---
+    "cbrReceivedBytes":             "_dl_served_bytes",
 
     # --- delay: simulation-only, no TRACTOR counterpart ---
     "cbrFrameDelay":                "latency_simonly",
@@ -124,6 +131,7 @@ AGG = {
     "_dl_bytes":              "sum",
     "_ul_bytes":              "sum",
     "_ul_offered_bytes":      "sum",
+    "_dl_served_bytes":       "sum",
     "dl_error_pct":           "mean",
     "ul_error_pct":           "mean",
     "harq_attempts_simonly":  "mean",
@@ -175,8 +183,13 @@ def classify(module):
     return mod, "other", stack
 
 
+SERVER_APP_RE = re.compile(r"\.server\.app\[\d+\]$")
+APP_PARAMS = {"typename", "destAddress", "packetSize", "samplingTime", "startTime", "finishTime"}
+
+
 def load(path):
-    keep = []
+    """Vector rows we use, plus the server apps' parameters and run attributes."""
+    keep, params, attrs = [], [], {}
     for chunk in pd.read_csv(path, chunksize=20000, low_memory=False):
         if "type" not in chunk.columns:
             sys.exit("Expected a 'type' column. Export with -F CSV-R.")
@@ -186,6 +199,12 @@ def load(path):
                     & (chunk["vectime"].notna())]
         if not sel.empty:
             keep.append(sel)
+        p = chunk[(chunk["type"] == "param") & chunk["name"].isin(APP_PARAMS)
+                  & chunk["module"].astype(str).str.contains(SERVER_APP_RE)]
+        if not p.empty:
+            params.append(p[["module", "name", "value"]])
+        for _, r in chunk[chunk["type"] == "runattr"].iterrows():
+            attrs[r["attrname"]] = r["attrvalue"]
     if not keep:
         sys.exit(
             "No matching vectors with data.\n"
@@ -193,7 +212,47 @@ def load(path):
             "few KB contains declarations and nothing else.\n"
             "Run the named config explicitly, e.g.  -c UrbanCongestion"
         )
-    return pd.concat(keep, ignore_index=True)
+    params = pd.concat(params, ignore_index=True) if params else None
+    return pd.concat(keep, ignore_index=True), params, attrs
+
+
+def quantity(text):
+    """'1400B' -> 1400.0, '0.004s' -> 0.004, '20ms' -> 0.02, '"ue[3]"' -> 'ue[3]'."""
+    s = str(text).strip().strip('"')
+    m = re.fullmatch(r"(-?[0-9.eE+-]+)\s*(B|KiB|MiB|s|ms|us)?", s)
+    if not m:
+        return s
+    scale = {"KiB": 1024, "MiB": 1024 ** 2, "ms": 1e-3, "us": 1e-6}.get(m.group(2), 1)
+    return float(m.group(1)) * scale
+
+
+def dl_offered(params, n_bins):
+    """
+    Payload bytes each server CbrSender sends to its UE per bin, from the
+    app's own parameters: one packetSize every samplingTime from startTime
+    until finishTime (0 = until the end).
+    """
+    if params is None or params.empty:
+        return None
+    apps = params.pivot_table(index="module", columns="name", values="value", aggfunc="first")
+    rows = []
+    end = n_bins * BIN_S
+    for _, a in apps.iterrows():
+        if "CbrSender" not in str(a.get("typename", "")):
+            continue
+        m = UE_RE.search("." + str(quantity(a["destAddress"])))
+        if not m:
+            continue
+        size, period = quantity(a["packetSize"]), quantity(a["samplingTime"])
+        start, finish = quantity(a["startTime"]), quantity(a["finishTime"])
+        stop = end if not finish else min(finish, end)
+        sends = np.arange(start, stop, period)
+        counts = np.bincount((sends // BIN_S).astype(int), minlength=n_bins)[:n_bins]
+        rows.append(pd.DataFrame({
+            "node": f"UE_{m.group(1)}", "bin": np.arange(n_bins),
+            "dl_offered_bytes": counts * size,
+            "traffic_class": "mmtc" if size <= 100 else "embb"}))
+    return pd.concat(rows, ignore_index=True) if rows else None
 
 
 def to_floats(s):
@@ -347,37 +406,36 @@ def join_cell_to_ue(df):
     return ue
 
 
-def finalise(ue, run_name):
+def finalise(ue, offered, attrs, run_name):
+    """Canonical identity columns plus the DL label inputs."""
     ue = ue.rename(columns={"node": "ue"})
-    ue["source"] = "simu5g"
-    ue["experiment"] = run_name
-    ue["segment"] = 0
-    ue["slice"] = "unknown"
+    if offered is not None:
+        ue = ue.merge(offered.rename(columns={"node": "ue"}), on=["ue", "bin"], how="left")
+        ue["dl_offered_bytes"] = ue["dl_offered_bytes"].fillna(0)
+    else:
+        print("  NOTE: no server app parameters in the export, so dl_offered_bytes "
+              "stays empty. Export the .sca together with the .vec.")
+    if "_dl_served_bytes" in ue:
+        ue["dl_served_bytes"] = ue.pop("_dl_served_bytes").fillna(0)
 
-    # Not emitted by Simu5G; columns kept so the schema matches TRACTOR and
-    # downstream code needs no special case.
-    ue["requested_prbs"] = np.nan
-    ue["granted_prbs"] = np.nan
-    ue["dl_buffer_bytes"] = np.nan
-    ue["ul_buffer_bytes"] = np.nan
+    config, rep = attrs.get("configname", ""), attrs.get("repetition", "")
+    ue["source"] = "simu5g"
+    ue["experiment"] = run_name or (f"{config}-{rep}" if config else "sim")
+    ue["trial"] = str(rep)
+    ue["condition"] = config
+    ue["t_s"] = ue["bin"] * BIN_S
+    ue["slicing_enabled"] = 0
+    if "traffic_class" not in ue:
+        ue["traffic_class"] = "unknown"
+    # requested_prbs, granted_prbs (per UE) and the buffers are not emitted by
+    # Simu5G; to_canonical() adds them as empty columns so the schema matches.
 
     conc = ue.groupby("bin")["ue"].nunique().rename("n_ue_active")
     ue = ue.merge(conc, on="bin", how="left")
-
-    ordered = ["source", "experiment", "segment", "ue", "bin",
-               "n_ue_active", "slice", "serving_cell",
-               "dl_buffer_bytes", "ul_buffer_bytes",
-               "requested_prbs", "granted_prbs",
-               "cell_granted_prbs", "cell_granted_prbs_ul",
-               "dl_cqi", "ul_cqi", "ul_sinr", "dl_mbps", "ul_mbps",
-               "ul_offered_mbps_simonly",
-               "dl_error_pct", "ul_error_pct",
-               "latency_simonly", "rlc_delay_simonly", "mac_delay_simonly",
-               "dl_sinr_simonly", "harq_attempts_simonly", "_rlc_rate_diag"]
-    for c in ordered:
+    for c in COLUMNS + ["_rlc_rate_diag"]:     # a statistic that never fired
         if c not in ue:
             ue[c] = np.nan
-    return ue[ordered].sort_values(["bin", "ue"]).reset_index(drop=True)
+    return ue
 
 
 def report(df):
@@ -428,11 +486,19 @@ def report(df):
             print("  WARNING: the cell never approaches saturation in this "
                   "run. No congestion to predict.")
 
+    if {"dl_served_bytes", "dl_offered_bytes"}.issubset(df.columns):
+        both = df[["dl_served_bytes", "dl_offered_bytes"]].dropna()
+        both = both[both["dl_offered_bytes"] > 0]
+        if not both.empty:
+            ratio = both["dl_served_bytes"] / both["dl_offered_bytes"]
+            print(f"\nDL served / offered per UE-bin: p5 {ratio.quantile(.05):.3f}  "
+                  f"p50 {ratio.median():.3f}   below 0.5: {(ratio < 0.5).mean():.1%}")
+
     both = df[["ul_mbps", "ul_offered_mbps_simonly"]].dropna()
     both = both[both["ul_offered_mbps_simonly"] > 0]
     if not both.empty:
         ratio = both["ul_mbps"] / both["ul_offered_mbps_simonly"]
-        print(f"\nUL served / offered per UE-bin: p5 {ratio.quantile(.05):.3f}  "
+        print(f"UL served / offered per UE-bin: p5 {ratio.quantile(.05):.3f}  "
               f"p50 {ratio.median():.3f}")
 
     if df["_rlc_rate_diag"].notna().any():
@@ -458,11 +524,12 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("raw_csv")
     ap.add_argument("out_csv")
-    ap.add_argument("--run", default="sim")
+    ap.add_argument("--run", default=None,
+                    help="experiment name (default: <configname>-<repetition> from the export)")
     args = ap.parse_args()
 
     print(f"Loading {args.raw_csv} ...")
-    raw = load(args.raw_csv)
+    raw, params, attrs = load(args.raw_csv)
     print(f"  {len(raw)} vector series matched")
 
     print("Exploding events ...")
@@ -482,10 +549,11 @@ def main():
     print("Joining cell-level allocation onto UEs ...")
     ue = join_cell_to_ue(wide)
 
-    out = finalise(ue, args.run)
-    report(out)
+    offered = dl_offered(params, int(ev["bin"].max()) + 1)
+    full = finalise(ue, offered, attrs, args.run)
+    report(full)
 
-    out.to_csv(args.out_csv, index=False)
+    to_canonical(full).to_csv(args.out_csv, index=False)
     print(f"\nwrote {args.out_csv}")
 
 
