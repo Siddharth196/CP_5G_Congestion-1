@@ -26,6 +26,8 @@ results/
 # External datasets (TRACTOR is downloaded, not versioned here) and built datasets
 data/
 
+__pycache__/
+
 # OMNeT++ result files and indexes written outside results/
 *.vec
 *.vci
