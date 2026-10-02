@@ -382,17 +382,28 @@ set's mean and std (`scaler.json`).
 
 Facts the modelling step must account for:
 
-- Label prevalence differs by an order of magnitude: simulator 35 % of rows
+- Label prevalence differs by an order of magnitude: simulator 34 % of rows
   starved, TRACTOR 2.2 % (onsets 7 % vs 0.6 %). Use PR-AUC and calibrate.
 - E5's train side (4–6 UEs) has few onsets (≈ 240) against ≈ 1,350 in its
   test side (9–10 UEs).
 - `n_ue_active` is 20 or 50 in the simulator but 1–10 in TRACTOR; it is
   identity, not a feature.
-- Simulator seeds come from a queue that was still running when the
-  datasets were first built; re-run `export_all.sh` and `build_datasets.py`
-  after more seeds finish. Counts are in each `manifest.json`.
+- Counts per experiment are in each `manifest.json`. After adding runs,
+  re-run `export_all.sh` and `build_datasets.py`.
+
+| Experiment | Train rows (onsets) | Test rows (onsets) |
+|---|---|---|
+| E1 | 355,737 (24,693) | 129,809 (7,207) |
+| E2 | 485,546 (31,900) | 242,347 (1,026) |
+| E3_k05 | 500,034 (31,954) | 242,347 (1,026) |
+| E3_k10 | 516,980 (32,002) | 242,347 (1,026) |
+| E3_k20 | 557,017 (32,216) | 242,347 (1,026) |
+| E4 | 359,245 (2,580) | 242,347 (1,026) |
+| E5 | 139,104 (237) | 124,701 (1,355) |
 
 ## 19. Simulator seeds
 
-`UrbanCongestion` and `HeavyLoad` have seeds 0–4 queued, the other four
-scenarios seeds 0–2. Each 120 s run takes ~45 min on one core.
+22 completed 120 s runs: `UrbanCongestion` and `HeavyLoad` seeds 0–4, the
+other four scenarios seeds 0–2 (485,546 rows). E1 holds out the highest seed
+of each scenario. Each run takes ~45 min on one core; `repeat = 10` allows
+seeds up to 9 if more are needed.
