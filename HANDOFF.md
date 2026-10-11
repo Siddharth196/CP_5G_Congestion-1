@@ -132,6 +132,11 @@ E5 at 0.3 has only 35 training onsets, so treat that one as indicative.
 - Answer "why" questions about the network behind ML results.
 - Keep the Stage 1 report sections up to date.
 
+**Running new simulations:** Windows 11 Smart App Control blocks the
+self-built `5g_simulation.exe` on the original laptop. New runs (more seeds, a
+one-cell scenario) need a PC without Smart App Control, or Linux/WSL (see
+README §1). Dataset rebuilds need only Python and work anywhere.
+
 ## How to ask for a change
 
 Open a GitHub issue (or send a message) saying what is needed and why, for
