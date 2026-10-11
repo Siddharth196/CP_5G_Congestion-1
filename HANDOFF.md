@@ -93,6 +93,23 @@ E3_k20, E4, E5). Each folder holds:
 | E4 | 359,245 | 2,580 | 242,347 | 1,026 |
 | E5 | 139,104 | 237 | 124,701 | 1,355 |
 
+### Threshold variants (sensitivity runs)
+
+`data/datasets_t03/` and `data/datasets_t07/` are the same seven
+experiments labelled at threshold 0.3 and 0.7 instead of 0.5. They use
+**identical splits and rows**; only `ratio < threshold`, and hence
+`starved` and `onset`, change. Train on the main sets; repeat the final
+models on these to show the result does not hinge on 0.5. These were built
+with `build_datasets.py --threshold` and pass `tests.py`.
+
+| Exp. | Test onsets at 0.3 | at 0.5 | at 0.7 |
+|---|---|---|---|
+| E1 | 7,078 | 7,207 | 7,703 |
+| E2 / E3 / E4 | 326 | 1,026 | 1,727 |
+| E5 (train / test) | 35 / 822 | 237 / 1,355 | 591 / 2,139 |
+
+E5 at 0.3 has only 35 training onsets, so treat that one as indicative.
+
 ## Rules that protect the result
 
 - Inputs are the six `f_*` columns only. Adding `ratio`, `starved`,

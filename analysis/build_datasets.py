@@ -65,7 +65,7 @@ def load_sim(pattern, exclude):
     if not frames:
         sys.exit(f"No simulator runs matched {pattern}")
     sim = pd.concat(frames, ignore_index=True)
-    return label(sim, "bytes").assign(label_basis="bytes")
+    return label(sim, "bytes", threshold=THRESHOLD).assign(label_basis="bytes")
 
 
 def load_tractor(path):
@@ -73,7 +73,7 @@ def load_tractor(path):
     if (t["slicing_enabled"] != 0).any():
         sys.exit("TRACTOR table contains slicing_enabled != 0 rows; re-run "
                  "harmonise_tractor.py without --keep-slicing.")
-    return label(t, "prb").assign(label_basis="prb")
+    return label(t, "prb", threshold=THRESHOLD).assign(label_basis="prb")
 
 
 def split_sim(sim):
@@ -157,13 +157,17 @@ def write(name, train, test, out, notes):
 
 
 def main():
+    global THRESHOLD
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[1])
     ap.add_argument("--sim", required=True, help='glob of simulator canonical CSVs, quoted')
     ap.add_argument("--tractor", required=True, help="canonical TRACTOR CSV")
     ap.add_argument("--out", default="data/datasets")
     ap.add_argument("--exclude-configs", default="Tiny,Medium",
                     help="simulator configs left out (smoke tests)")
+    ap.add_argument("--threshold", type=float, default=THRESHOLD,
+                    help="starvation threshold on the ratio (sensitivity runs: 0.3, 0.7)")
     args = ap.parse_args()
+    THRESHOLD = args.threshold
     rng = np.random.default_rng(SEED)
 
     print("Labelling simulator runs (bytes basis) ...")
