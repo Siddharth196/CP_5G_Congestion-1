@@ -34,3 +34,6 @@ __pycache__/
 *.sca
 *.elog
 
+
+# Reports, hand-off zips and backups kept beside the code (large, not versioned)
+project_files/
