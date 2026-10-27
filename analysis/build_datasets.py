@@ -1,14 +1,16 @@
 #!/usr/bin/env python3
 """
-build_datasets.py — labelled, normalised train/test sets for experiments E1-E5
+build_datasets.py — labelled, normalised train/test sets for experiments E1-E6
 
     python analysis/build_datasets.py --sim "results/canonical/*.csv" \
-        --tractor data/canonical/tractor.csv --out data/datasets
+        --tractor data/canonical/tractor.csv --out data/datasets \
+        [--srsran "data/canonical/srsran/*.csv"]
 
 Inputs are canonical tables (parse_vectors2.py / harmonise_tractor.py). Both
 sources are labelled by labels.py with the same threshold, hysteresis and
 horizon: TRACTOR on granted/requested PRBs (the true label), the simulator on
-served/offered DL bytes (it emits no requested-PRB statistic).
+served/offered DL bytes (it emits no requested-PRB statistic). srsRAN
+testbed tables, when given, are labelled on bytes like the simulator.
 
 Experiments (from the project plan)
   E1  sim -> sim            train: sim runs except held-out seeds; test: held-out seeds
@@ -17,6 +19,13 @@ Experiments (from the project plan)
                             test: TRACTOR test conditions; k = 5, 10, 20
   E4  real -> real          train: TRACTOR pool; test: TRACTOR test conditions
   E5  real 4-6 UEs -> 9-10  train: Trials 1-3 multi4-6; test: Trials 1-3 multi9-10
+  E6  sim -> srsRAN         train: all sim; test: the srsRAN testbed (zero-shot);
+                            only with --srsran
+  E6_matched                train: the OneCell* testbed-matched sim runs only;
+                            test: srsRAN; only with --srsran and OneCell* runs
+
+OneCell* runs (one 52-PRB cell, 3-4 UEs) never enter E1-E5, so those stay
+identical whether or not the matched runs exist.
 
 E2, E3 and E4 share one TRACTOR test set, a fixed ~30 % of conditions per
 trial, so E4 - E2 is measured on identical data. Splits never cut through a
@@ -28,6 +37,11 @@ the TRAIN set's mean and std (missing values forward-filled within each UE
 series, then set to the train mean, i.e. 0 after scaling). Rows whose onset
 horizon falls outside the series have onset = NaN; drop them when training
 on onset.
+
+Every manifest records prb_capacity_per_bin per source: the divisor its
+cell_util was computed with, recovered from cell_granted_prbs / cell_util.
+A source scaled with a capacity outside canonical.PRB_CAPACITY (e.g. a
+52-PRB srsRAN cell divided by 12,500) stops the build.
 """
 
 import argparse
@@ -40,7 +54,7 @@ import numpy as np
 import pandas as pd
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from canonical import FEATURES, IDENTITY  # noqa: E402
+from canonical import FEATURES, IDENTITY, PRB_CAPACITY  # noqa: E402
 from labels import HORIZON, HYSTERESIS, SERIES, THRESHOLD, label  # noqa: E402
 
 SEED = 7
@@ -49,6 +63,8 @@ E3_SHARES = [0.05, 0.10, 0.20]
 E5_TRAIN = {"multi4", "multi5", "multi6"}
 E5_TEST = {"multi9", "multi10"}
 LABELS = ["ratio", "starved", "onset"]
+ONECELL = "OneCell"       # config-name prefix of the testbed-matched sim runs
+SRSRAN_REQUIRED = IDENTITY + FEATURES + ["dl_offered_bytes", "dl_served_bytes", "cell_granted_prbs"]
 
 
 def load_sim(pattern, exclude):
@@ -66,6 +82,49 @@ def load_sim(pattern, exclude):
         sys.exit(f"No simulator runs matched {pattern}")
     sim = pd.concat(frames, ignore_index=True)
     return label(sim, "bytes", threshold=THRESHOLD).assign(label_basis="bytes")
+
+
+def load_srsran(pattern):
+    """srsRAN testbed tables, delivered by the integration team in the canonical schema."""
+    files = sorted(glob.glob(pattern))
+    if not files:
+        sys.exit(f"No srsRAN tables matched {pattern}")
+    s = pd.concat([pd.read_csv(f, low_memory=False, dtype={"ue": str}) for f in files],
+                  ignore_index=True)
+    missing = [c for c in SRSRAN_REQUIRED if c not in s]
+    if missing:
+        sys.exit(f"srsRAN tables lack canonical columns {missing} (see HANDOFF.md, E6).")
+    if set(s["source"]) != {"srsran"}:
+        sys.exit(f"srsRAN tables must have source == 'srsran', found {sorted(set(s['source']))}")
+    if (s["slicing_enabled"] != 0).any():
+        sys.exit("srsRAN tables contain slicing_enabled != 0 rows.")
+    if s["dl_offered_bytes"].isna().all() or s["dl_served_bytes"].isna().all():
+        sys.exit("srsRAN tables need dl_offered_bytes (UDP rate x 0.25 s) and "
+                 "dl_served_bytes (received at the UE's app) for the bytes label.")
+    if s.duplicated(["experiment", "ue", "bin"]).any():
+        sys.exit("srsRAN tables have more than one row per (experiment, ue, bin).")
+    for c in s.columns:
+        if c not in IDENTITY + ["label_basis"] and s[c].dtype == object:
+            s[c] = pd.to_numeric(s[c], errors="coerce")
+    return label(s, "bytes", threshold=THRESHOLD).assign(label_basis="bytes")
+
+
+def capacity(df):
+    """
+    PRB capacity per bin each source's cell_util was scaled with, as
+    {source: int, or a sorted list if the source mixes cells}. Raises
+    ValueError for a capacity canonical.PRB_CAPACITY does not allow.
+    """
+    out = {}
+    for src, g in df.groupby("source"):
+        ok = g["cell_util"].gt(0) & g["cell_granted_prbs"].notna()
+        caps = np.unique(np.rint(g.loc[ok, "cell_granted_prbs"] / g.loc[ok, "cell_util"])).astype(int).tolist()
+        bad = set(caps) - PRB_CAPACITY.get(src, set())
+        if bad:
+            raise ValueError(f"source {src}: cell_util was divided by {sorted(bad)}; "
+                             f"allowed {sorted(PRB_CAPACITY.get(src, set()))} (250 ms x PRBs)")
+        out[src] = caps[0] if len(caps) == 1 else caps or None   # None: cell never busy
+    return out
 
 
 def load_tractor(path):
@@ -122,6 +181,7 @@ def fill(df):
 def write(name, train, test, out, notes):
     d = os.path.join(out, name)
     os.makedirs(d, exist_ok=True)
+    caps = capacity(pd.concat([train, test]))
     train, test = fill(train), fill(test)
     mean, std = train[FEATURES].mean(), train[FEATURES].std().replace(0, 1)
     cols = IDENTITY + FEATURES + [f"f_{c}" for c in FEATURES] + ["label_basis"] + LABELS
@@ -147,7 +207,9 @@ def write(name, train, test, out, notes):
                 "label": {"threshold": THRESHOLD, "hysteresis_bins": HYSTERESIS,
                           "onset_horizon_bins": HORIZON, "bin_s": 0.25,
                           "basis": {"simu5g": "dl_served_bytes / dl_offered_bytes",
-                                    "tractor": "granted_prbs / requested_prbs"}},
+                                    "tractor": "granted_prbs / requested_prbs",
+                                    "srsran": "dl_served_bytes / dl_offered_bytes"}},
+                "prb_capacity_per_bin": caps,
                 **summary}
     with open(os.path.join(d, "manifest.json"), "w") as fh:
         json.dump(manifest, fh, indent=2)
@@ -166,12 +228,18 @@ def main():
                     help="simulator configs left out (smoke tests)")
     ap.add_argument("--threshold", type=float, default=THRESHOLD,
                     help="starvation threshold on the ratio (sensitivity runs: 0.3, 0.7)")
+    ap.add_argument("--srsran", default=None,
+                    help="glob of srsRAN testbed canonical CSVs, quoted; adds E6 (and E6_matched)")
     args = ap.parse_args()
     THRESHOLD = args.threshold
     rng = np.random.default_rng(SEED)
 
     print("Labelling simulator runs (bytes basis) ...")
     sim = load_sim(args.sim, set(args.exclude_configs.split(",")))
+    matched = sim["condition"].astype(str).str.startswith(ONECELL)
+    onecell, sim = sim[matched], sim[~matched]
+    if len(onecell):
+        print(f"  {onecell['experiment'].nunique()} {ONECELL}* runs kept apart for E6_matched")
     print(f"  {sim['experiment'].nunique()} runs, {len(sim):,} rows, starved {sim['starved'].mean():.1%}")
     print("Labelling TRACTOR (PRB basis) ...")
     tr = load_tractor(args.tractor)
@@ -192,6 +260,14 @@ def main():
     e5 = tr[tr["trial"].isin(["Trial1", "Trial2", "Trial3"])]
     write("E5", e5[e5["condition"].isin(E5_TRAIN)], e5[e5["condition"].isin(E5_TEST)],
           args.out, "real 4-6 UEs -> real 9-10 UEs (Trials 1-3)")
+    if args.srsran:
+        print("\nLabelling srsRAN (bytes basis) ...")
+        sr = load_srsran(args.srsran)
+        print(f"  {sr['experiment'].nunique()} experiments, {len(sr):,} rows, starved {sr['starved'].mean():.1%}")
+        write("E6", sim, sr, args.out, "sim -> srsRAN testbed, zero-shot")
+        if len(onecell):
+            write("E6_matched", onecell, sr, args.out,
+                  f"{ONECELL}* testbed-matched sim runs -> srsRAN testbed, zero-shot")
     print(f"\nwrote {args.out}/<experiment>/{{train,test}}.csv.gz, scaler.json, manifest.json")
 
 

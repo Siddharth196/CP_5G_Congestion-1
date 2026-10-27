@@ -2,7 +2,8 @@
 
 ## The border in one line
 
-**The seven folders in `data/datasets/` are the border.** The telecom team is
+**The folders in `data/datasets/` are the border**: seven for E1–E5, plus
+E6 and E6_matched once the srsRAN testbed data is in. The telecom team is
 responsible for everything that produces them. The ML team is responsible for
 everything that reads them. Neither side edits the other side's files: if the
 ML team needs different data, it asks, and the telecom team rebuilds.
@@ -44,8 +45,11 @@ E3_k20, E4, E5). Each folder holds:
 - `train.csv.gz` and `test.csv.gz`: one row per user per 250 ms interval.
 - `scaler.json`: the mean and standard deviation used for the `f_*` columns,
   fitted on train only.
-- `manifest.json`: row counts, onset counts, and which runs or conditions are
-  in train and test.
+- `manifest.json`: row counts, onset counts, which runs or conditions are
+  in train and test, and `prb_capacity_per_bin` per source. That is the
+  divisor of `cell_util`: 250 slots × PRBs, so 12,500 for 50 PRBs and 13,000
+  for 52. The build stops if a source was scaled with the wrong one, and
+  `tests.py` checks the field.
 
 `data/` is not on GitHub, so the folder travels as a zip
 (`CP_5G_Congestion_datasets.zip`).
@@ -59,12 +63,12 @@ E3_k20, E4, E5). Each folder holds:
 | `onset` | **Target** | 1 = not starved now, starved 1 s later. Empty = undefined: drop the row |
 | `starved` | Never an input | The current starved state; used for analysis, persistence baseline and episode lengths |
 | `ratio` | **Never an input** | Supply ÷ demand; the label is built from it |
-| `source`, `experiment`, `ue` | Grouping | One time series = one (`experiment`, `ue`) pair |
+| `source`, `experiment`, `ue` | Grouping | One time series = one (`experiment`, `ue`) pair. `source` is `simu5g`, `tractor` or, in E6, `srsran` |
 | `bin`, `t_s` | Ordering | Interval index and seconds |
 | `serving_cell` | Graph grouping | Users with the same (`experiment`, `serving_cell`, `bin`) share a cell at that moment |
 | `traffic_class` | Reporting only | embb / urllc / mmtc / unknown; results per class |
 | `n_ue_active` | Reporting only | Users present; used for E5 and per-load results |
-| `label_basis` | Reporting only | `prb` (real) or `bytes` (simulator) |
+| `label_basis` | Reporting only | `prb` (TRACTOR) or `bytes` (simulator, srsRAN) |
 | `trial`, `condition`, `slicing_enabled` | Reporting only | `slicing_enabled` is 0 everywhere |
 
 ## How to use the data
@@ -110,6 +114,67 @@ with `build_datasets.py --threshold` and pass `tests.py`.
 
 E5 at 0.3 has only 35 training onsets, so treat that one as indicative.
 
+## E6: the srsRAN testbed (built, waiting for data)
+
+E6 trains on the same simulator rows as E2 and tests on the integration
+team's srsRAN testbed (zero-shot). E6_matched trains only on the
+testbed-matched simulator runs (`OneCell*` configs, below) and tests on the
+same srsRAN rows. Both use the bytes label (delivered ÷ offered), like the
+simulator, because srsRAN reports no requested PRBs.
+
+The code is in place and tested on synthetic tables. When the testbed data
+arrives:
+
+```bash
+python analysis/build_datasets.py --sim "results/canonical/*.csv" \
+    --tractor data/canonical/tractor.csv --out data/datasets \
+    --srsran "data/canonical/srsran/*.csv"
+python analysis/tests.py data/datasets
+```
+
+E1–E5 come out identical. `OneCell*` runs never enter them.
+
+**What the integration team delivers:** one CSV per testbed run, one row per
+UE per 250 ms bin, using the canonical column names (`analysis/canonical.py`).
+
+| Column | Value |
+|---|---|
+| `source` | `srsran` |
+| `experiment` | Unique run name, e.g. `srsran/load130-run1` |
+| `trial`, `condition` | Run number; load level (e.g. `load130`) |
+| `ue` | `UE_<id>` (a string) |
+| `bin`, `t_s` | Bin index from the run's start; `bin × 0.25` |
+| `n_ue_active`, `traffic_class`, `slicing_enabled`, `serving_cell` | UEs with a row in the bin; `embb`; `0`; `1` |
+| `cell_granted_prbs` | Downlink PRBs used, summed over every slot in the bin |
+| `cell_util` | `cell_granted_prbs ÷ 13,000` (52 PRBs × 250 slots) |
+| `dl_cqi`, `ul_sinr` | Mean of the reports in the bin (`cqi`, `pusch_snr_db`) |
+| `dl_mbps`, `ul_mbps` | `dl_brate`, `ul_brate` ÷ 1,000, averaged over the bin |
+| `ul_error_pct` | `Σnok ÷ (Σok + Σnok) × 100` over the bin; empty if no uplink transmissions |
+| `dl_offered_bytes` | iperf3 UDP rate × 0.25 s ÷ 8 (fixed-rate UDP only, never TCP) |
+| `dl_served_bytes` | Bytes received by the UE's iperf3 in the bin (not `dl_brate`) |
+
+A missing bin counts as a gap: leave it out rather than filling it. The
+build rejects tables that:
+- lack any of these columns;
+- have another `source` value;
+- have empty offered or served bytes;
+- repeat a (`experiment`, `ue`, `bin`); or
+- divide `cell_util` by anything other than 13,000.
+
+E6 needs onsets, so total offered load must exceed the cell's capacity
+(about 120–150 % of the measured maximum UDP throughput).
+
+**Testbed-matched simulator runs (for E6_matched):**
+- **Network and configs:** `OneCellTestbed.ned` and the `OneCellCapacity`,
+  `OneCellTestbed` and `OneCellTestbed3` configs in `omnetpp.ini`.
+- **Layout:** one gNB, 4 or 3 static UEs, 52 PRBs, band 3, and fixed-rate
+  UDP downlink at 60–150 % of capacity.
+- **Where to run them:** Linux (Smart App Control blocks the simulator here).
+  The steps are in the comment above the configs: measure capacity, set
+  `capMbps`, run the sweep, then `export_all.sh`.
+- **Parser:** it reads `numBands = 52` from the export and divides by 13,000
+  automatically.
+
 ## Rules that protect the result
 
 - Inputs are the six `f_*` columns only. Adding `ratio`, `starved`,
@@ -127,8 +192,10 @@ E5 at 0.3 has only 35 training onsets, so treat that one as indicative.
 
 - Rebuild datasets on request (other thresholds or horizons), and keep
   `tests.py` passing.
-- Optional: more seeds, a heavier uplink burst, a one-cell scenario matched to
-  TRACTOR, and a Simu5G patch that reports requested PRBs.
+- Build E6 once the srsRAN tables arrive (see above).
+- Optional: more seeds, a heavier uplink burst, and a Simu5G patch that
+  reports requested PRBs. The one-cell testbed-matched configs are written
+  and only need running on Linux.
 - Answer "why" questions about the network behind ML results.
 - Keep the Stage 1 report sections up to date.
 

@@ -19,8 +19,24 @@ TTIS_PER_BIN = int(BIN_S / TTI_S)     # 250
 N_PRB = 50                            # 10 MHz carrier in both sources
 PRB_CEILING = TTIS_PER_BIN * N_PRB    # 12,500 RBs per cell per bin
 
+
+def prb_capacity(n_prb=N_PRB):
+    """RBs a cell can hand out in one bin: the divisor of cell_util."""
+    return TTIS_PER_BIN * int(n_prb)
+
+
+# Capacities build_datasets.py accepts per source. A source whose cell_util
+# implies any other divisor was scaled wrongly and is rejected. simu5g:
+# 50 PRBs, or 52 for the OneCell* testbed-matched configs; srsran: the
+# integration team's 10 MHz NR testbed (52 PRBs, 15 kHz).
+PRB_CAPACITY = {
+    "simu5g": {prb_capacity(50), prb_capacity(52)},
+    "tractor": {prb_capacity(50)},
+    "srsran": {prb_capacity(52)},
+}
+
 IDENTITY = [
-    "source",           # "simu5g" | "tractor"
+    "source",           # "simu5g" | "tractor" | "srsran"
     "experiment",       # sim: run name (UrbanCongestion-0); TRACTOR: Trial2/multi6
     "trial",            # sim: seed; TRACTOR: Trial0..Trial3
     "condition",        # sim: config name; TRACTOR: condition folder (multi6, embb2, ...)
@@ -30,7 +46,7 @@ IDENTITY = [
     "n_ue_active",      # UEs with a row in this experiment and bin
     "traffic_class",    # embb | mmtc | urllc | unknown
     "slicing_enabled",  # 0 for every row used in the experiments
-    "serving_cell",     # sim: gNB MacNodeId 1..4; TRACTOR: always 1 (single cell)
+    "serving_cell",     # sim: gNB MacNodeId 1..4; TRACTOR, srsRAN: always 1 (single cell)
 ]
 
 # Shared model inputs. cell_util is cell_granted_prbs / PRB_CEILING: Simu5G
@@ -62,11 +78,11 @@ def traffic_class(name):
     return "unknown"
 
 
-def to_canonical(df):
+def to_canonical(df, capacity=PRB_CEILING):
     """Add any missing canonical columns (as NaN) and order them."""
     df = df.copy()
     if "cell_granted_prbs" in df:
-        df["cell_util"] = df["cell_granted_prbs"] / PRB_CEILING
+        df["cell_util"] = df["cell_granted_prbs"] / capacity
     for c in COLUMNS:
         if c not in df:
             df[c] = float("nan")

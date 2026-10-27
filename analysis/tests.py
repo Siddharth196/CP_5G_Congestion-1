@@ -9,8 +9,12 @@ tests.py — checks for the data pipeline. No test framework needed:
                ground truth (handover, idle LTE stack, starved uplink, ...)
 2. labels      hysteresis and onset on hand-made series
 3. harmonise   bin alignment, cell sums and byte derivation on tiny TRACTOR files
-4. datasets    no UE series in both train and test, E2/E3/E4 share one test
-               set, E3 real rows come from the pool, scaling fitted on train
+4. capacity    cell_util divisor per source (50 vs 52 PRBs), srsRAN input checks
+5. pipeline    build_datasets.py end to end on synthetic simulator, TRACTOR,
+               OneCell* and srsRAN tables, then the dataset checks on its output
+6. datasets    no UE series in both train and test, E2/E3/E4 share one test
+               set, E3 real rows come from the pool, scaling fitted on train,
+               prb_capacity_per_bin in every manifest, E6 when built
 """
 
 import csv
@@ -26,7 +30,7 @@ import pandas as pd
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
-from canonical import COLUMNS, FEATURES  # noqa: E402
+from canonical import COLUMNS, FEATURES, PRB_CAPACITY, prb_capacity  # noqa: E402
 from labels import label  # noqa: E402
 
 FAILS = []
@@ -39,7 +43,7 @@ def check(name, cond):
 
 
 # --------------------------------------------------------------------------- 1
-def synthetic_export(path):
+def synthetic_export(path, num_bands=None):
     """4 s, 2 UEs, 2 gNBs; vector names exactly as the corrected ini records."""
     N, END = "UrbanCongestionCluster", 4.0
     rows = [{"type": "runattr", "attrname": "configname", "attrvalue": "Synthetic"},
@@ -78,7 +82,9 @@ def synthetic_export(path):
                  "packetSize": "1400B", "samplingTime": "0.005s", "startTime": "0.001s",
                  "finishTime": "0s"}.items():
         par("server.app[0]", k, v)
-    cols = ["run", "type", "module", "name", "attrname", "attrvalue", "value", "vectime", "vecvalue"]
+    if num_bands:
+        par("carrierAggregation.componentCarrier[0]", "numBands", str(num_bands))
+    cols =["run", "type", "module", "name", "attrname", "attrvalue", "value", "vectime", "vecvalue"]
     with open(path, "w", newline="") as f:
         w = csv.DictWriter(f, fieldnames=cols)
         w.writeheader()
@@ -117,6 +123,14 @@ def test_parser(tmp):
     check("latency from cbrFrameDelay", np.allclose(u0["latency_simonly"], 0.010))
     check("traffic class from packet size", (u0["traffic_class"] == "embb").all())
     check("UE without traffic has dl_mbps 0", (u1["dl_mbps"] == 0).all())
+
+    raw52, out52 = os.path.join(tmp, "raw52.csv"), os.path.join(tmp, "out52.csv")
+    synthetic_export(raw52, num_bands=52)
+    p = subprocess.run([sys.executable, os.path.join(HERE, "parse_vectors2.py"), raw52, out52],
+                       capture_output=True, text=True)
+    d52 = pd.read_csv(out52) if p.returncode == 0 else None
+    check("numBands = 52 in the export -> cell_util = cell_granted_prbs / 13,000",
+          d52 is not None and np.allclose(d52["cell_util"], d52["cell_granted_prbs"] / 13000))
 
 
 # --------------------------------------------------------------------------- 2
@@ -181,8 +195,101 @@ def test_harmonise(tmp):
 
 
 # --------------------------------------------------------------------------- 4
-def test_datasets(root):
-    print(f"4. datasets in {root}")
+def canonical_table(source, experiment, condition, trial, cap, n_ue=3, n_bins=200, seed=0):
+    """Random canonical rows for one experiment; cell_util scaled with `cap`."""
+    rng = np.random.default_rng(seed)
+    n = n_ue * n_bins
+    d = pd.DataFrame({c: np.nan for c in COLUMNS}, index=range(n))
+    d["source"], d["experiment"], d["condition"], d["trial"] = source, experiment, condition, trial
+    d["ue"] = np.repeat([f"UE_{i}" for i in range(n_ue)], n_bins)
+    d["bin"] = np.tile(np.arange(n_bins), n_ue)
+    d["t_s"] = d["bin"] * 0.25
+    d["n_ue_active"], d["traffic_class"], d["slicing_enabled"], d["serving_cell"] = n_ue, "embb", 0, 1
+    for c in FEATURES:
+        d[c] = rng.normal(5, 2, n)
+    # slow load wave, so starvation comes in runs long enough for hysteresis
+    load = 0.5 + 0.5 * np.sin(d["bin"] / 9 + rng.uniform(0, 6, n_ue).repeat(n_bins))
+    d["cell_granted_prbs"] = np.rint(load * 0.9 * cap + 1)
+    d["cell_util"] = d["cell_granted_prbs"] / cap
+    d["dl_offered_bytes"] = 10000.0
+    d["dl_served_bytes"] = 10000.0 * np.clip(1.2 - load, 0, 1)
+    if source == "tractor":
+        d["requested_prbs"] = 100.0
+        d["granted_prbs"] = 100.0 * np.clip(1.2 - load, 0, 1)
+    return d
+
+
+def test_capacity(tmp):
+    print("4. capacity and srsRAN inputs")
+    from build_datasets import capacity, load_srsran
+    check("capacity = 250 x PRBs (50 -> 12,500, 52 -> 13,000)",
+          prb_capacity(50) == 12500 and prb_capacity(52) == 13000)
+    mixed = pd.concat([canonical_table("simu5g", "s", "Urban", "0", 12500),
+                       canonical_table("simu5g", "o", "OneCellTestbed", "0", 13000),
+                       canonical_table("tractor", "t", "multi4", "Trial1", 12500),
+                       canonical_table("srsran", "r", "load130", "1", 13000)])
+    check("capacity per source recovered from cell_granted_prbs / cell_util",
+          capacity(mixed) == {"simu5g": [12500, 13000], "tractor": 12500, "srsran": 13000})
+    for src, wrong in [("srsran", 12500), ("tractor", 13000), ("simu5g", 50)]:
+        try:
+            capacity(canonical_table(src, "x", "c", "0", wrong))
+            check(f"{src} scaled by {wrong:,} is rejected", False)
+        except ValueError:
+            check(f"{src} scaled by {wrong:,} is rejected", True)
+
+    def rejected(df, why):
+        path = os.path.join(tmp, "bad_srsran.csv")
+        df.to_csv(path, index=False)
+        try:
+            load_srsran(path)
+            check(f"srsRAN input rejected: {why}", False)
+        except SystemExit:
+            check(f"srsRAN input rejected: {why}", True)
+
+    good = canonical_table("srsran", "srsran/run1", "load130", "1", 13000)
+    rejected(good.drop(columns=["dl_offered_bytes"]), "no dl_offered_bytes column")
+    rejected(good.assign(source="tractor"), "source is not 'srsran'")
+    rejected(good.assign(dl_served_bytes=np.nan), "dl_served_bytes empty")
+    rejected(pd.concat([good, good.head(1)]), "duplicate (experiment, ue, bin)")
+    path = os.path.join(tmp, "good_srsran.csv")
+    good.to_csv(path, index=False)
+    s = load_srsran(path)
+    check("valid srsRAN table labelled on bytes",
+          (s["label_basis"] == "bytes").all() and s["starved"].sum() > 0 and s["onset"].sum() > 0)
+
+
+# --------------------------------------------------------------------------- 5
+def test_pipeline(tmp):
+    print("5. pipeline on synthetic tables (with OneCell* and srsRAN)")
+    sim_dir, sr_dir, out = (os.path.join(tmp, x) for x in ["sim", "srsran", "datasets"])
+    os.makedirs(sim_dir)
+    os.makedirs(sr_dir)
+    for k, (cond, seed, cap) in enumerate([("Urban", 0, 12500), ("Urban", 1, 12500),
+                                           ("OneCellTestbed", 0, 13000)]):
+        canonical_table("simu5g", f"{cond}-{seed}", cond, str(seed), cap, seed=k).to_csv(
+            os.path.join(sim_dir, f"{cond}-{seed}.csv"), index=False)
+    conds = [("Trial1", c) for c in ["multi4", "multi5", "multi9", "multi10"]] + \
+            [("Trial2", c) for c in ["multi3", "multi6", "multi9"]]
+    pd.concat([canonical_table("tractor", f"{t}/{c}", c, t, 12500, seed=10 + k)
+               for k, (t, c) in enumerate(conds)]).to_csv(os.path.join(tmp, "tractor.csv"), index=False)
+    for k in range(2):
+        canonical_table("srsran", f"srsran/run{k}", "load130", str(k), 13000, seed=20 + k).to_csv(
+            os.path.join(sr_dir, f"run{k}.csv"), index=False)
+    p = subprocess.run([sys.executable, os.path.join(HERE, "build_datasets.py"),
+                        "--sim", os.path.join(sim_dir, "*.csv"), "--tractor", os.path.join(tmp, "tractor.csv"),
+                        "--srsran", os.path.join(sr_dir, "*.csv"), "--out", out],
+                       capture_output=True, text=True)
+    check("build_datasets.py with --srsran exits cleanly", p.returncode == 0)
+    if p.returncode:
+        print(p.stdout[-1500:], p.stderr[-2000:])
+        return
+    check("E6 and E6_matched written", {"E6", "E6_matched"} <= set(os.listdir(out)))
+    test_datasets(out, prefix="5.")
+
+
+# --------------------------------------------------------------------------- 6
+def test_datasets(root, prefix="6."):
+    print(f"{prefix} datasets in {root}")
     exps = sorted(d for d in os.listdir(root) if os.path.isdir(os.path.join(root, d)))
     check("all experiments present",
           {"E1", "E2", "E3_k05", "E3_k10", "E3_k20", "E4", "E5"} <= set(exps))
@@ -202,11 +309,30 @@ def test_datasets(root):
             m = json.load(fh)
         check(f"{e}: manifest row counts match files",
               m["train"]["rows"] == len(tr) and m["test"]["rows"] == len(te))
+        caps = m.get("prb_capacity_per_bin", {})
+        sources = set(tr.source) | set(te.source)
+        check(f"{e}: prb_capacity_per_bin given for every source and allowed for it",
+              set(caps) == sources and all(
+                  set(np.atleast_1d(caps[s])) <= PRB_CAPACITY[s] for s in sources if caps[s] is not None))
+        util = pd.concat([tr["cell_util"], te["cell_util"]])
+        check(f"{e}: raw cell_util within [0, 1.25]", util.min() >= 0 and util.max() <= 1.25)
+        if e in {"E1", "E2", "E3_k05", "E3_k10", "E3_k20", "E4", "E5"}:
+            check(f"{e}: no OneCell* testbed-matched runs",
+                  not pd.concat([tr.condition, te.condition]).astype(str).str.startswith("OneCell").any())
         if e == "E2":
             check("E2: trains on simulator only, tests on TRACTOR only",
                   set(tr.source) == {"simu5g"} and set(te.source) == {"tractor"})
+        if e == "E2":
+            e2_train = key(tr)
         if e == "E4":
             pool = key(tr)
+        if e in {"E6", "E6_matched"}:
+            check(f"{e}: trains on simulator only, tests on srsRAN only, bytes label",
+                  set(tr.source) == {"simu5g"} and set(te.source) == {"srsran"}
+                  and set(te.label_basis) == {"bytes"})
+        if e == "E6_matched":
+            check("E6_matched: trains on OneCell* runs only",
+                  tr.condition.astype(str).str.startswith("OneCell").all())
         if e == "E5":
             check("E5: train 4-6 UE conditions, test 9-10",
                   set(tr.condition) <= {"multi4", "multi5", "multi6"} and set(te.condition) <= {"multi9", "multi10"})
@@ -216,6 +342,10 @@ def test_datasets(root):
         tr = pd.read_csv(os.path.join(root, e, "train.csv.gz"), usecols=["source", "experiment", "ue"],
                          dtype={"ue": str})
         check(f"{e}: real rows come from the E4 pool", key(tr[tr.source == "tractor"]) <= pool)
+    if "E6" in tests:
+        tr = pd.read_csv(os.path.join(root, "E6", "train.csv.gz"), usecols=["experiment", "ue"],
+                         dtype={"ue": str})
+        check("E6 trains on exactly the E2 simulator rows", key(tr) == e2_train)
 
 
 def main():
@@ -223,6 +353,8 @@ def main():
         test_parser(tmp)
         test_labels()
         test_harmonise(tmp)
+        test_capacity(tmp)
+        test_pipeline(tmp)
     if len(sys.argv) > 1:
         test_datasets(sys.argv[1])
     print(f"\n{'ALL PASSED' if not FAILS else f'{len(FAILS)} FAILED: ' + '; '.join(FAILS)}")

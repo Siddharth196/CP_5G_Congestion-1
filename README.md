@@ -15,6 +15,7 @@ TRACTOR logs/Multi-UE ──harmonise_tractor.py──► data/canonical/tractor
 |---|---|
 | `omnetpp.ini` | Scenario, traffic and result-recording configuration |
 | `UrbanCongestionCluster.ned` | Network: 1 macro + 3 micro gNBs, 4 interference-only background cells, 50 UEs |
+| `OneCellTestbed.ned` | One 52-PRB cell with 3–4 static UEs, matched to the integration team's srsRAN testbed (`OneCell*` configs, E6_matched) |
 | `demo.xml` | IPv4 address plan for the configurator |
 | `run` | Launcher that sets the NED path (fixes `Cannot resolve module type 'LteChannelControl'`) |
 | `analysis/canonical.py` | The shared schema, constants and feature list |
@@ -45,7 +46,10 @@ this directory as `../inet-4.6.0` and `../simu5g-1.4.3`. `run` uses Cmdenv
 unless you pass `-u Qtenv`. Every config has `repeat = 10` seeds; pick one
 with `-r N`. Results go to `results/<Config>-<rep>.vec/.sca`. Scenarios:
 `LightLoad`, `UrbanCongestion`, `GradualCongestion`, `HighMobility`,
-`LowMobility`, `HeavyLoad` (CHANGES.md §14 compares them).
+`LowMobility`, `HeavyLoad` (CHANGES.md §14 compares them). The
+testbed-matched one-cell configs `OneCellCapacity`, `OneCellTestbed` and
+`OneCellTestbed3` are explained in their comment block in `omnetpp.ini` and
+in HANDOFF.md (E6).
 
 ## 2. Build the datasets
 

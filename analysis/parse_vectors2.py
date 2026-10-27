@@ -70,7 +70,7 @@ import numpy as np
 import pandas as pd
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from canonical import BIN_S, COLUMNS, PRB_CEILING, TTIS_PER_BIN, to_canonical  # noqa: E402
+from canonical import BIN_S, COLUMNS, N_PRB, TTIS_PER_BIN, prb_capacity, to_canonical  # noqa: E402
 
 # ---------------------------------------------------------------------------
 # Statistic base name -> canonical KPI.
@@ -185,6 +185,7 @@ def classify(module):
 
 SERVER_APP_RE = re.compile(r"\.server\.app\[\d+\]$")
 APP_PARAMS = {"typename", "destAddress", "packetSize", "samplingTime", "startTime", "finishTime"}
+CARRIER_RE = re.compile(r"\.carrierAggregation\.componentCarrier\[0\]$")
 
 
 def load(path):
@@ -203,6 +204,10 @@ def load(path):
                   & chunk["module"].astype(str).str.contains(SERVER_APP_RE)]
         if not p.empty:
             params.append(p[["module", "name", "value"]])
+        nb = chunk[(chunk["type"] == "param") & (chunk["name"] == "numBands")
+                   & chunk["module"].astype(str).str.contains(CARRIER_RE)]
+        if not nb.empty:
+            attrs["numBands"] = nb["value"].iloc[0]
         for _, r in chunk[chunk["type"] == "runattr"].iterrows():
             attrs[r["attrname"]] = r["attrvalue"]
     if not keep:
@@ -438,7 +443,7 @@ def finalise(ue, offered, attrs, run_name):
     return ue
 
 
-def report(df):
+def report(df, capacity):
     print(f"\nrows: {len(df):,}   UEs: {df['ue'].nunique()}   "
           f"bins: {df['bin'].nunique()}   max concurrency: "
           f"{int(df['n_ue_active'].max()) if df['n_ue_active'].notna().any() else 0}")
@@ -469,17 +474,17 @@ def report(df):
     g = df.drop_duplicates(["serving_cell", "bin"])["cell_granted_prbs"]
     if g.notna().any():
         mx = g.max()
-        print(f"\ncell_granted_prbs max = {mx:,.1f}   (ceiling {PRB_CEILING:,})")
-        if mx < PRB_CEILING / 20:
+        print(f"\ncell_granted_prbs max = {mx:,.1f}   (ceiling {capacity:,})")
+        if mx < capacity / 20:
             print(f"  -> looks like a per-interval average rather than a "
                   f"per-bin sum. Scale by the number of emissions per bin "
                   f"(up to {TTIS_PER_BIN}) before comparing with TRACTOR.")
-        elif mx > PRB_CEILING * 1.5:
+        elif mx > capacity * 1.5:
             print("  -> above the ceiling. Check for double counting across "
                   "carriers or stacks.")
         else:
             print("  -> scale matches TRACTOR summed over UEs per bin.")
-        util = g / PRB_CEILING
+        util = g / capacity
         print(f"  utilisation per cell-bin  p50 {util.quantile(.5):.3f}  "
               f"p95 {util.quantile(.95):.3f}  max {util.max():.3f}")
         if util.max() < 0.5:
@@ -526,11 +531,18 @@ def main():
     ap.add_argument("out_csv")
     ap.add_argument("--run", default=None,
                     help="experiment name (default: <configname>-<repetition> from the export)")
+    ap.add_argument("--prbs", type=int, default=None,
+                    help="PRBs per slot (default: numBands from the export, else 50)")
     args = ap.parse_args()
 
     print(f"Loading {args.raw_csv} ...")
     raw, params, attrs = load(args.raw_csv)
     print(f"  {len(raw)} vector series matched")
+    # cell_util divides by 250 x PRBs; the OneCell* configs use 52, not 50
+    n_prb = args.prbs or int(float(attrs.get("numBands", N_PRB)))
+    capacity = prb_capacity(n_prb)
+    how = "--prbs" if args.prbs else "numBands" if "numBands" in attrs else "default"
+    print(f"  {n_prb} PRBs per slot ({how}): cell_util = cell_granted_prbs / {capacity:,}")
 
     print("Exploding events ...")
     ev = explode(raw)
@@ -551,9 +563,9 @@ def main():
 
     offered = dl_offered(params, int(ev["bin"].max()) + 1)
     full = finalise(ue, offered, attrs, args.run)
-    report(full)
+    report(full, capacity)
 
-    to_canonical(full).to_csv(args.out_csv, index=False)
+    to_canonical(full, capacity).to_csv(args.out_csv, index=False)
     print(f"\nwrote {args.out_csv}")
 
 
