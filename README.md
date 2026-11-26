@@ -15,15 +15,19 @@ TRACTOR logs/Multi-UE ──harmonise_tractor.py──► data/canonical/tractor
 |---|---|
 | `omnetpp.ini` | Scenario, traffic and result-recording configuration |
 | `UrbanCongestionCluster.ned` | Network: 1 macro + 3 micro gNBs, 4 interference-only background cells, 50 UEs |
-| `OneCellTestbed.ned` | One 52-PRB cell with 3–4 static UEs, matched to the integration team's srsRAN testbed (`OneCell*` configs, E6_matched) |
+| `OneCellTestbed.ned` | One cell with static UEs: the srsRAN-testbed-matched `OneCell*` configs (52 PRBs, 3–4 UEs, E6_matched) and the TRACTOR-matched `TractorMatched*` sweep (4–10 UEs) |
 | `demo.xml` | IPv4 address plan for the configurator |
 | `run` | Launcher that sets the NED path (fixes `Cannot resolve module type 'LteChannelControl'`) |
+| `run_opp` | The same through OMNeT++'s own `opp_run` plus the INET/Simu5G libraries; use it where Windows Smart App Control blocks the built `5g_simulation.exe` |
 | `analysis/canonical.py` | The shared schema, constants and feature list |
 | `analysis/parse_vectors2.py` | Simulator export → canonical CSV |
 | `analysis/export_all.sh` | Export + parse every run in `results/` |
 | `analysis/harmonise_tractor.py` | TRACTOR Multi-UE logs → canonical CSV |
 | `analysis/labels.py` | Congestion state and onset labels (both sources) |
 | `analysis/build_datasets.py` | Labelled, normalised train/test sets for E1–E5 |
+| `analysis/build_tractor_matched.py` | The TRACTOR-matched sweep as its own dataset (TM50 / TM52), separate from E1–E6 |
+| `analysis/calibrate_tractor_matched.py`, `analysis/run_sweep.sh` | Rate calibration and a parallel run launcher for that sweep |
+| `analysis/TRACTOR_MATCHED.md` | That sweep: design, calibration, commands, results |
 | `analysis/tests.py` | Checks for all of the above |
 | `CHANGES.md` | What was changed and why, with evidence and results |
 
@@ -122,6 +126,23 @@ series. Each folder has `train.csv.gz`, `test.csv.gz`, `scaler.json` and
 are standardised with the train set's statistics; raw features are kept
 alongside. `onset` is empty where the 1 s horizon runs past the end of a
 series; drop those rows when training on onset.
+
+## TRACTOR-matched sweep (`data/datasets_tractor_matched/`)
+
+A separate simulator dataset. It does not replace or change E1–E6:
+- **What it is:** one cell with 4, 6, 8 or 10 static UEs, like TRACTOR, built
+  from the `TractorMatched` (50 PRBs) and `TractorMatched52` (52 PRBs)
+  configs.
+- **Use:** an extra simulator training source and a held-out simulator test
+  set.
+- **Split:** `TM50/` and `TM52/` hold out the highest seed of each UE count.
+- **Diagnostic columns, not model inputs:** `n_ues`, `dl_cqi_filled`,
+  `ue_x_m`, `ue_y_m`.
+- **Keeping it apart:** `build_datasets.py` leaves every `TractorMatched*`
+  run out of E1–E6.
+
+Design, calibration, commands and results are in
+[analysis/TRACTOR_MATCHED.md](analysis/TRACTOR_MATCHED.md).
 
 ## Building natively on Windows
 
