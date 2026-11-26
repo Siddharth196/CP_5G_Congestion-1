@@ -1,0 +1,34 @@
+#!/bin/sh
+# Like `run`, but through OMNeT++'s own opp_run, which loads the INET and
+# Simu5G libraries, instead of the self-built 5g_simulation executable.
+# Windows 11 Smart App Control blocks that executable; opp_run ships with
+# OMNeT++ and runs. This project has no C++ of its own, so the two are
+# equivalent. Run it in OMNeT++'s shell (mingwenv.cmd, or `. setenv`).
+#
+#     sh run_opp -c TractorMatchedCapacity
+#     sh run_opp -c TractorMatched -r 3
+
+DIR=$(cd "$(dirname "$0")" && pwd)
+INET_ROOT=${INET_ROOT:-$DIR/../inet-4.6.0}
+SIMU5G_ROOT=${SIMU5G_ROOT:-$DIR/../simu5g-1.4.3}
+
+for d in "$INET_ROOT/src" "$SIMU5G_ROOT/src"; do
+    if [ ! -d "$d" ]; then
+        echo "run_opp: NED folder not found: $d (set INET_ROOT / SIMU5G_ROOT)" >&2
+        exit 1
+    fi
+done
+case "$(uname -s)" in
+    MINGW*|MSYS*|CYGWIN*) PATH="$INET_ROOT/src:$SIMU5G_ROOT/src:$PATH" ;;
+esac
+case " $* " in
+    *" -u "*) ;;
+    *) set -- -u Cmdenv "$@" ;;
+esac
+
+cd "$DIR" || exit 1
+# -x: project_files/ and data/ hold old copies of NED files, not the model
+exec opp_run -l "$INET_ROOT/src/INET" -l "$SIMU5G_ROOT/src/simu5g" \
+    -n ".:$SIMU5G_ROOT/src:$INET_ROOT/src" -x "project_files;data" \
+    --image-path="$INET_ROOT/images:$SIMU5G_ROOT/images" \
+    "$@"

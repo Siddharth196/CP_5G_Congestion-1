@@ -6,12 +6,16 @@ tests.py — checks for the data pipeline. No test framework needed:
     python analysis/tests.py data/datasets   # + checks on built datasets
 
 1. parser      parse_vectors2.py on a synthetic CSV-R export with known
-               ground truth (handover, idle LTE stack, starved uplink, ...)
+               ground truth (handover, idle LTE stack, starved uplink, ...),
+               several sender apps per UE, static UE positions
 2. labels      hysteresis and onset on hand-made series
 3. harmonise   bin alignment, cell sums and byte derivation on tiny TRACTOR files
 4. capacity    cell_util divisor per source (50 vs 52 PRBs), srsRAN input checks
 5. pipeline    build_datasets.py end to end on synthetic simulator, TRACTOR,
-               OneCell* and srsRAN tables, then the dataset checks on its output
+               OneCell*, TractorMatched* and srsRAN tables, then the dataset
+               checks on its output
+5b. tractor-matched  build_tractor_matched.py: held-out seed per n_ues,
+               dl_cqi_filled, forward-fill, divisor per run, summary
 6. datasets    no UE series in both train and test, E2/E3/E4 share one test
                set, E3 real rows come from the pool, scaling fitted on train,
                prb_capacity_per_bin in every manifest, E6 when built
@@ -43,8 +47,12 @@ def check(name, cond):
 
 
 # --------------------------------------------------------------------------- 1
-def synthetic_export(path, num_bands=None):
-    """4 s, 2 UEs, 2 gNBs; vector names exactly as the corrected ini records."""
+def synthetic_export(path, num_bands=None, sessions=False, static=False):
+    """
+    4 s, 2 UEs, 2 gNBs; vector names exactly as the corrected ini records.
+    sessions: a second sender app serves ue[0] from 2 s to 3 s (TractorMatched*).
+    static:   StationaryMobility parameters for both UEs.
+    """
     N, END = "UrbanCongestionCluster", 4.0
     rows = [{"type": "runattr", "attrname": "configname", "attrvalue": "Synthetic"},
             {"type": "runattr", "attrname": "repetition", "attrvalue": "3"}]
@@ -82,6 +90,16 @@ def synthetic_export(path, num_bands=None):
                  "packetSize": "1400B", "samplingTime": "0.005s", "startTime": "0.001s",
                  "finishTime": "0s"}.items():
         par("server.app[0]", k, v)
+    if sessions:
+        for k, v in {"typename": '"simu5g.apps.cbr.CbrSender"', "destAddress": '"ue[0]"',
+                     "packetSize": "1400B", "samplingTime": "0.005s", "startTime": "2.0001s",
+                     "finishTime": "3s"}.items():
+            par("server.app[1]", k, v)
+    mobility = "StationaryMobility" if static else "RandomWaypointMobility"
+    for i, (x, y) in enumerate([(120.5, 480.0), (910.0, 75.25)]):
+        par(f"ue[{i}].mobility", "typename", f'"inet.mobility.static.{mobility}"')
+        par(f"ue[{i}].mobility", "initialX", f"{x}m")
+        par(f"ue[{i}].mobility", "initialY", f"{y}m")
     if num_bands:
         par("carrierAggregation.componentCarrier[0]", "numBands", str(num_bands))
     cols =["run", "type", "module", "name", "attrname", "attrvalue", "value", "vectime", "vecvalue"]
@@ -131,6 +149,25 @@ def test_parser(tmp):
     d52 = pd.read_csv(out52) if p.returncode == 0 else None
     check("numBands = 52 in the export -> cell_util = cell_granted_prbs / 13,000",
           d52 is not None and np.allclose(d52["cell_util"], d52["cell_granted_prbs"] / 13000))
+
+    rawtm, outtm = os.path.join(tmp, "rawtm.csv"), os.path.join(tmp, "outtm.csv")
+    synthetic_export(rawtm, sessions=True, static=True)
+    p = subprocess.run([sys.executable, os.path.join(HERE, "parse_vectors2.py"), rawtm, outtm],
+                       capture_output=True, text=True)
+    check("parser exits cleanly on a sessions + static export", p.returncode == 0)
+    if p.returncode:
+        print(p.stderr[-2000:])
+        return
+    t = pd.read_csv(outtm)
+    t0 = t[t.ue == "UE_0"].set_index("bin")
+    check("several sender apps per UE: still one row per (ue, bin)", not t.duplicated(["ue", "bin"]).any())
+    check("several sender apps per UE: offered bytes summed (2 x 70,000 while both run)",
+          (t0.loc[9:11, "dl_offered_bytes"] == 140000).all() and (t0.loc[1:7, "dl_offered_bytes"] == 70000).all())
+    check("static UEs: canonical columns, then ue_x_m / ue_y_m",
+          list(t.columns) == COLUMNS + ["ue_x_m", "ue_y_m"])
+    check("static UEs: position from initialX / initialY",
+          np.allclose(t0["ue_x_m"], 120.5) and np.allclose(t[t.ue == "UE_1"]["ue_y_m"], 75.25))
+    check("moving UEs: no position columns (initial position only)", "ue_x_m" not in d.columns)
 
 
 # --------------------------------------------------------------------------- 2
@@ -268,6 +305,9 @@ def test_pipeline(tmp):
                                            ("OneCellTestbed", 0, 13000)]):
         canonical_table("simu5g", f"{cond}-{seed}", cond, str(seed), cap, seed=k).to_csv(
             os.path.join(sim_dir, f"{cond}-{seed}.csv"), index=False)
+    # a TractorMatched run in the same folder must stay out of E1-E6
+    canonical_table("simu5g", "TractorMatched-n4-0", "TractorMatched", "0", 12500, n_ue=4, seed=9).to_csv(
+        os.path.join(sim_dir, "TractorMatched-n4-0.csv"), index=False)
     conds = [("Trial1", c) for c in ["multi4", "multi5", "multi9", "multi10"]] + \
             [("Trial2", c) for c in ["multi3", "multi6", "multi9"]]
     pd.concat([canonical_table("tractor", f"{t}/{c}", c, t, 12500, seed=10 + k)
@@ -285,6 +325,66 @@ def test_pipeline(tmp):
         return
     check("E6 and E6_matched written", {"E6", "E6_matched"} <= set(os.listdir(out)))
     test_datasets(out, prefix="5.")
+
+
+def test_tractor_matched(tmp):
+    print("5b. TRACTOR-matched sweep (build_tractor_matched.py) on synthetic runs")
+    run_dir, out = os.path.join(tmp, "tm"), os.path.join(tmp, "tm_datasets")
+    os.makedirs(run_dir)
+    runs = [("TractorMatched", n, s, 12500) for n in (4, 6) for s in range(3)] + \
+           [("TractorMatched52", 4, s, 13000) for s in range(2)] + \
+           [("TractorMatchedCalib", 4, 0, 12500)]
+    empty = {}
+    for k, (cond, n, s, cap) in enumerate(runs):
+        name = f"{cond}-n{n}-{s}" if cond != "TractorMatchedCalib" else f"{cond}-n{n}-k3-s4-{s}"
+        d = canonical_table("simu5g", name, cond, str(s), cap, n_ue=n, seed=30 + k)
+        rng = np.random.default_rng(k)
+        d.loc[rng.random(len(d)) < 0.1, "dl_cqi"] = np.nan        # bins without a DL frame
+        d["ue_x_m"] = d["ue"].str[3:].astype(float) * 10
+        d["ue_y_m"] = 500.0
+        empty[name] = d.set_index(["ue", "bin"])["dl_cqi"].isna()
+        d.to_csv(os.path.join(run_dir, f"{name}.csv"), index=False)
+    p = subprocess.run([sys.executable, os.path.join(HERE, "build_tractor_matched.py"),
+                        "--sim", os.path.join(run_dir, "*.csv"), "--out", out],
+                       capture_output=True, text=True)
+    check("build_tractor_matched.py exits cleanly", p.returncode == 0)
+    if p.returncode:
+        print(p.stdout[-1500:], p.stderr[-2000:])
+        return
+    for name, cap, held in [("TM50", 12500, {"TractorMatched-n4-2", "TractorMatched-n6-2"}),
+                            ("TM52", 13000, {"TractorMatched52-n4-1"})]:
+        tr = pd.read_csv(os.path.join(out, name, "train.csv.gz"))
+        te = pd.read_csv(os.path.join(out, name, "test.csv.gz"))
+        with open(os.path.join(out, name, "manifest.json")) as fh:
+            m = json.load(fh)
+        both = pd.concat([tr, te], ignore_index=True)
+        check(f"{name}: test = highest seed of each n_ues, whole runs", set(te.experiment) == held
+              and not (set(tr.experiment) & set(te.experiment)))
+        check(f"{name}: calibration runs left out", not both.experiment.str.contains("Calib").any())
+        check(f"{name}: cell_util divisor {cap:,} in the manifest, per run too",
+              m["prb_capacity_per_bin"] == {"simu5g": cap}
+              and set(m["prb_capacity_per_run"].values()) == {cap})
+        flag = both.set_index(["experiment", "ue", "bin"])["dl_cqi_filled"]
+        truth = pd.concat({e: s for e, s in empty.items()}, names=["experiment", "ue", "bin"]).astype(int)
+        check(f"{name}: dl_cqi_filled = 1 exactly where the canonical dl_cqi was empty",
+              (flag == truth.reindex(flag.index)).all())
+        srt = both.sort_values(["experiment", "ue", "bin"], ignore_index=True)
+        seen = srt.groupby(["experiment", "ue"]).dl_cqi.transform(lambda s: s.notna().cummax()).astype(bool)
+        check(f"{name}: dl_cqi forward-filled (empty only before a series' first CQI)",
+              srt.loc[seen, "dl_cqi"].notna().all() and srt["dl_cqi_filled"].sum() > 0)
+        check(f"{name}: dl_cqi_filled, n_ues and positions are not model inputs",
+              not {"f_dl_cqi_filled", "f_n_ues", "f_ue_x_m", "f_link_limited"} & set(both.columns)
+              and {"n_ues", "dl_cqi_filled", "ue_x_m", "ue_y_m", "link_limited"} <= set(both.columns))
+        per_ue = both[both.ratio.notna()].groupby(["experiment", "ue"]).agg(
+            share=("starved", "mean"), flag=("link_limited", "first"))
+        check(f"{name}: link_limited = 1 exactly for UEs starved in > 90 % of their demand bins",
+              ((per_ue.share > 0.9).astype(int) == per_ue.flag).all())
+        z = tr[[f"f_{c}" for c in FEATURES]]
+        check(f"{name}: train features standardised", (z.mean().abs() < 0.05).all())
+    s = pd.read_csv(os.path.join(out, "summary.csv"))
+    check("summary: one row per set and n_ues with the requested columns",
+          len(s) == 3 and {"starved_share", "onset_share", "onsets", "median_dl_cqi",
+                           "median_cell_util"} <= set(s.columns))
 
 
 # --------------------------------------------------------------------------- 6
@@ -316,6 +416,8 @@ def test_datasets(root, prefix="6."):
                   set(np.atleast_1d(caps[s])) <= PRB_CAPACITY[s] for s in sources if caps[s] is not None))
         util = pd.concat([tr["cell_util"], te["cell_util"]])
         check(f"{e}: raw cell_util within [0, 1.25]", util.min() >= 0 and util.max() <= 1.25)
+        check(f"{e}: no TractorMatched* runs (separate dataset)",
+              not pd.concat([tr.condition, te.condition]).astype(str).str.startswith("TractorMatched").any())
         if e in {"E1", "E2", "E3_k05", "E3_k10", "E3_k20", "E4", "E5"}:
             check(f"{e}: no OneCell* testbed-matched runs",
                   not pd.concat([tr.condition, te.condition]).astype(str).str.startswith("OneCell").any())
@@ -355,6 +457,7 @@ def main():
         test_harmonise(tmp)
         test_capacity(tmp)
         test_pipeline(tmp)
+        test_tractor_matched(tmp)
     if len(sys.argv) > 1:
         test_datasets(sys.argv[1])
     print(f"\n{'ALL PASSED' if not FAILS else f'{len(FAILS)} FAILED: ' + '; '.join(FAILS)}")

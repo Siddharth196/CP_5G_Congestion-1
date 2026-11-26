@@ -175,6 +175,23 @@ E6 needs onsets, so total offered load must exceed the cell's capacity
 - **Parser:** it reads `numBands = 52` from the export and divides by 13,000
   automatically.
 
+## TRACTOR-matched sweep: an extra, separate simulator dataset
+
+`data/datasets_tractor_matched/` is a separate dataset. It is **not part of
+E1–E6**, which it does not change.
+- **What it is:** one cell with 4, 6, 8 or 10 static UEs, like TRACTOR.
+- **Use:** an extra simulator training source and a held-out simulator test
+  set.
+- **Sets:**
+  - `TM50`: 50 PRBs, `cell_util` ÷ 12,500, as TRACTOR.
+  - `TM52`: 52 PRBs, ÷ 13,000, as the srsRAN testbed.
+- **Split:** train is seeds 0–3 of each UE count; test is seed 4.
+- **Columns:** the same as E1–E6, plus `n_ues`, `dl_cqi_filled`, `ue_x_m`,
+  `ue_y_m` and `link_limited`. **None of these is an input.**
+- **Read the caveats first:** `link_limited` UEs are starved by their own
+  weak link, not by contention. Details:
+  [analysis/TRACTOR_MATCHED.md](analysis/TRACTOR_MATCHED.md).
+
 ## Rules that protect the result
 
 - Inputs are the six `f_*` columns only. Adding `ratio`, `starved`,
@@ -199,10 +216,15 @@ E6 needs onsets, so total offered load must exceed the cell's capacity
 - Answer "why" questions about the network behind ML results.
 - Keep the Stage 1 report sections up to date.
 
-**Running new simulations:** Windows 11 Smart App Control blocks the
-self-built `5g_simulation.exe` on the original laptop. New runs (more seeds, a
-one-cell scenario) need a PC without Smart App Control, or Linux/WSL (see
-README §1). Dataset rebuilds need only Python and work anywhere.
+**Running new simulations:**
+- Windows 11 Smart App Control blocks the self-built `5g_simulation.exe` on
+  the original laptop.
+- `run_opp` runs the same model through OMNeT++'s own `opp_run`, which
+  works there. The TractorMatched sweep was run this way.
+- Use `analysis/run_sweep.sh` for many runs; it resumes an interrupted
+  sweep.
+- Keep the PC awake: Windows standby stalls the runs.
+- Dataset rebuilds need only Python and work anywhere.
 
 ## How to ask for a change
 

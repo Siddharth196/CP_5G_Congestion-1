@@ -186,6 +186,8 @@ def classify(module):
 SERVER_APP_RE = re.compile(r"\.server\.app\[\d+\]$")
 APP_PARAMS = {"typename", "destAddress", "packetSize", "samplingTime", "startTime", "finishTime"}
 CARRIER_RE = re.compile(r"\.carrierAggregation\.componentCarrier\[0\]$")
+UE_MOBILITY_RE = re.compile(r"\.ue\[\d+\]\.mobility$")
+MOBILITY_PARAMS = {"typename", "initialX", "initialY"}
 
 
 def load(path):
@@ -204,6 +206,10 @@ def load(path):
                   & chunk["module"].astype(str).str.contains(SERVER_APP_RE)]
         if not p.empty:
             params.append(p[["module", "name", "value"]])
+        mob = chunk[(chunk["type"] == "param") & chunk["name"].isin(MOBILITY_PARAMS)
+                    & chunk["module"].astype(str).str.contains(UE_MOBILITY_RE)]
+        if not mob.empty:
+            attrs.setdefault("_mobility", []).append(mob[["module", "name", "value"]])
         nb = chunk[(chunk["type"] == "param") & (chunk["name"] == "numBands")
                    & chunk["module"].astype(str).str.contains(CARRIER_RE)]
         if not nb.empty:
@@ -257,7 +263,35 @@ def dl_offered(params, n_bins):
             "node": f"UE_{m.group(1)}", "bin": np.arange(n_bins),
             "dl_offered_bytes": counts * size,
             "traffic_class": "mmtc" if size <= 100 else "embb"}))
-    return pd.concat(rows, ignore_index=True) if rows else None
+    if not rows:
+        return None
+    # a UE can be served by several sender apps (the TractorMatched* configs
+    # run each UE's downlink as separate sessions): one row per UE and bin
+    return (pd.concat(rows, ignore_index=True)
+            .groupby(["node", "bin"], as_index=False)
+            .agg(dl_offered_bytes=("dl_offered_bytes", "sum"),
+                 traffic_class=("traffic_class", "first")))
+
+
+def ue_positions(attrs):
+    """
+    (x, y) in metres per UE when every UE is static (StationaryMobility), from
+    its initialX / initialY parameters in the .sca; None otherwise, because a
+    moving UE's initial position says nothing about later bins.
+    """
+    mob = attrs.pop("_mobility", None)
+    if not mob:
+        return None
+    m = pd.concat(mob, ignore_index=True)
+    m["node"] = m["module"].map(lambda s: f"UE_{UE_RE.search(str(s)).group(1)}")
+    p = m.pivot_table(index="node", columns="name", values="value", aggfunc="first")
+    if not {"typename", "initialX", "initialY"} <= set(p.columns):
+        return None
+    if not p["typename"].astype(str).str.contains("StationaryMobility").all():
+        return None
+    return pd.DataFrame({"ue": p.index,
+                         "ue_x_m": p["initialX"].map(lambda v: float(str(v).rstrip("m"))),
+                         "ue_y_m": p["initialY"].map(lambda v: float(str(v).rstrip("m")))})
 
 
 def to_floats(s):
@@ -562,10 +596,17 @@ def main():
     ue = join_cell_to_ue(wide)
 
     offered = dl_offered(params, int(ev["bin"].max()) + 1)
+    pos = ue_positions(attrs)
     full = finalise(ue, offered, attrs, args.run)
     report(full, capacity)
 
-    to_canonical(full, capacity).to_csv(args.out_csv, index=False)
+    out = to_canonical(full, capacity)
+    if pos is not None:
+        out = out.merge(pos, on="ue", how="left")
+        print(f"\nstatic UEs: positions written as ue_x_m / ue_y_m "
+              f"(x {pos['ue_x_m'].min():.0f}-{pos['ue_x_m'].max():.0f} m, "
+              f"y {pos['ue_y_m'].min():.0f}-{pos['ue_y_m'].max():.0f} m)")
+    out.to_csv(args.out_csv, index=False)
     print(f"\nwrote {args.out_csv}")
 
 

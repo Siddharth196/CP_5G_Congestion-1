@@ -64,6 +64,9 @@ E5_TRAIN = {"multi4", "multi5", "multi6"}
 E5_TEST = {"multi9", "multi10"}
 LABELS = ["ratio", "starved", "onset"]
 ONECELL = "OneCell"       # config-name prefix of the testbed-matched sim runs
+# config-name prefix of the TRACTOR-matched single-cell sweep: a separate
+# dataset (build_tractor_matched.py), never part of E1-E6
+TRACTOR_MATCHED = "TractorMatched"
 SRSRAN_REQUIRED = IDENTITY + FEATURES + ["dl_offered_bytes", "dl_served_bytes", "cell_granted_prbs"]
 
 
@@ -236,6 +239,11 @@ def main():
 
     print("Labelling simulator runs (bytes basis) ...")
     sim = load_sim(args.sim, set(args.exclude_configs.split(",")))
+    tm = sim["condition"].astype(str).str.startswith(TRACTOR_MATCHED)
+    if tm.any():
+        print(f"  {sim.loc[tm, 'experiment'].nunique()} {TRACTOR_MATCHED}* runs left out "
+              f"(separate dataset: build_tractor_matched.py)")
+        sim = sim[~tm]
     matched = sim["condition"].astype(str).str.startswith(ONECELL)
     onecell, sim = sim[matched], sim[~matched]
     if len(onecell):
